@@ -52,8 +52,9 @@ Available suites are:
 - `float`: F/D arithmetic, conversions, NaN boxing, rounding, and flags.
 - `mem`: sandboxed loads, stores, atomics, LR/SC, and cache-block zeroing.
 - `csr`: portable CSR values and synchronous trap recovery. Implementation-defined WLRL/WARL values are deliberately excluded from exact comparison.
+- `atomics` (aliases `atomic`, `rv64a`, and `lrsc`): directed RV64A AMO and LR/SC semantics, including ordering-bit encodings, operand aliases, failure paths, and word-result sign extension.
 - `compressed` (aliases `rvc` and `c`): legal sequential RV64C integer operations plus aligned scratch-backed C.LW/C.LD/C.SW/C.SD.
-- `all`: a deterministic mix of the original 32-bit suites. The dedicated compressed suite is intentionally not included yet.
+- `all`: a deterministic mix of the original suites. The dedicated atomic and compressed suites are intentionally not included yet.
 
 Sail always uses per-instruction comparison, including scratch RAM for memory suites. QEMU defaults to block checkpoints with one-instruction replay on a mismatch; add `--step-check` to catch transient differences that are overwritten before the final checkpoint.
 

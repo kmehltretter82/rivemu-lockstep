@@ -120,7 +120,7 @@ impl RisuCase {
     pub const fn uses_scratch(&self) -> bool {
         matches!(
             self.suite,
-            Suite::SandboxMem | Suite::Compressed | Suite::All
+            Suite::SandboxMem | Suite::Atomics | Suite::Compressed | Suite::All
         )
     }
 

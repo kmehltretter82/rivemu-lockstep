@@ -22,9 +22,11 @@ pub enum Suite {
     SandboxMem,
     /// CSR WARL reads/writes and trap-handler recovery (`mtvec` signature checks).
     CsrTrap,
+    /// Directed RV64A AMO and LR/SC semantics over sandboxed scratch memory.
+    Atomics,
     /// Legal, sequential RV64C integer and scratch-memory operations.
     Compressed,
-    /// Combined mix of the original 32-bit suites (excluding [`Self::Compressed`]).
+    /// Original mixed suites, excluding specialized [`Self::Atomics`] and [`Self::Compressed`].
     All,
 }
 
@@ -40,6 +42,7 @@ impl Suite {
             "float" | "fp" | "fd" => Some(Self::Float),
             "mem" | "amo" | "sandboxmem" => Some(Self::SandboxMem),
             "csr" | "trap" | "csrtrap" => Some(Self::CsrTrap),
+            "atomic" | "atomics" | "rv64a" | "lrsc" => Some(Self::Atomics),
             "compressed" | "rvc" | "c" => Some(Self::Compressed),
             "all" => Some(Self::All),
             _ => None,
@@ -57,6 +60,7 @@ impl Suite {
             Self::Float => "float-fd",
             Self::SandboxMem => "sandbox-mem-amo",
             Self::CsrTrap => "csr-trap",
+            Self::Atomics => "rv64a-directed",
             Self::Compressed => "rv64c",
             Self::All => "all",
         }
@@ -66,6 +70,12 @@ impl Suite {
 /// Generates a block of `num_insns` instructions for `suite`, terminated by `EBREAK`.
 pub fn generate_block(rng: &mut Rng, suite: Suite, num_insns: usize) -> Vec<u32> {
     let mut out = Vec::with_capacity(num_insns + 4);
+    let mut atomic_slot = 0usize;
+    let mut atomic_selector = if suite == Suite::Atomics {
+        rng.index(ATOMIC_CASES)
+    } else {
+        0
+    };
     while out.len() < num_insns {
         let active = match suite {
             Suite::All => match rng.next_u64() % 8 {
@@ -89,6 +99,11 @@ pub fn generate_block(rng: &mut Rng, suite: Suite, num_insns: usize) -> Vec<u32>
             Suite::Float => out.push(gen_float(rng)),
             Suite::SandboxMem => gen_sandbox_mem(rng, &mut out),
             Suite::CsrTrap => gen_csr_trap(rng, &mut out),
+            Suite::Atomics => {
+                gen_atomic_case(atomic_selector, atomic_slot, &mut out);
+                atomic_slot += 1;
+                atomic_selector = (atomic_selector + 1) % ATOMIC_CASES;
+            }
             Suite::Compressed => {
                 unreachable!("compressed instructions use generate_compressed_block")
             }
@@ -579,6 +594,146 @@ fn gen_sandbox_mem(rng: &mut Rng, out: &mut Vec<u32>) {
     out.push(insn);
 }
 
+const ATOMIC_AMO_FUNCTS: [u32; 9] = [
+    0x00, // amoadd
+    0x01, // amoswap
+    0x04, // amoxor
+    0x08, // amoor
+    0x0c, // amoand
+    0x10, // amomin
+    0x14, // amomax
+    0x18, // amominu
+    0x1c, // amomaxu
+];
+const ATOMIC_AMO_CASES: usize = ATOMIC_AMO_FUNCTS.len() * 2 * 4;
+const ATOMIC_CASES: usize = ATOMIC_AMO_CASES + 12;
+
+fn atomic_insn(funct5: u32, aqrl: u32, dbl: bool, rd: u8, rs1: u8, rs2: u8) -> u32 {
+    debug_assert!(funct5 < 32 && aqrl < 4);
+    r_type(
+        0x2f,
+        rd,
+        if dbl { 0b011 } else { 0b010 },
+        rs1,
+        rs2,
+        (funct5 << 2) | aqrl,
+    )
+}
+
+fn atomic_slot_offset(slot: usize, dbl: bool) -> i32 {
+    // Keep each of the first 256 snippets in its own 8-byte scratch slot. Word
+    // atomics deliberately use the upper word, exercising 4-byte-but-not-8-byte
+    // alignment while leaving the lower word as an adjacent sentinel.
+    let base = ((slot % 256) * 8) as i32;
+    if dbl { base } else { base + 4 }
+}
+
+fn gen_atomic_setup(out: &mut Vec<u32>, slot: usize, dbl: bool) {
+    let offset = atomic_slot_offset(slot, dbl);
+    out.push(i_type(0x13, 5, 0b000, 8, offset)); // addi t0, s0, offset
+    if dbl {
+        // t1 = INT64_MIN, t2 = INT64_MAX. These distinguish signed and
+        // unsigned min/max and provide an edge-valued old result.
+        out.push(i_type(0x13, 6, 0b000, 0, 1));
+        out.push(i_type(0x13, 6, 0b001, 6, 63));
+        out.push(i_type(0x13, 7, 0b000, 0, -1));
+        out.push(i_type(0x13, 7, 0b101, 7, 1));
+        out.push(s_type(0x23, 0b011, 5, 6, 0)); // sd t1, 0(t0)
+    } else {
+        // t1[31:0] = INT32_MIN, t2[31:0] = INT32_MAX. The old AMO.W/LR.W
+        // result must be sign-extended, while only the addressed word changes.
+        out.push(u_type(0x37, 6, 0x80000));
+        out.push(u_type(0x37, 7, 0x80000));
+        out.push(i_type(0x13, 7, 0b000, 7, -1));
+        out.push(s_type(0x23, 0b010, 5, 7, -4)); // adjacent sentinel
+        out.push(s_type(0x23, 0b010, 5, 6, 0)); // sw t1, 0(t0)
+    }
+}
+
+fn gen_atomic_case(selector: usize, slot: usize, out: &mut Vec<u32>) {
+    debug_assert!(selector < ATOMIC_CASES);
+    if selector < ATOMIC_AMO_CASES {
+        let funct5 = ATOMIC_AMO_FUNCTS[selector / 8];
+        let dbl = (selector / 4) & 1 != 0;
+        let aqrl = (selector & 3) as u32;
+        gen_atomic_setup(out, slot, dbl);
+        out.push(atomic_insn(funct5, aqrl, dbl, 9, 5, 7));
+        return;
+    }
+
+    match selector - ATOMIC_AMO_CASES {
+        0 => {
+            // rd=x0: discard the old value without suppressing the memory update.
+            gen_atomic_setup(out, slot, false);
+            out.push(atomic_insn(0x01, 0b11, false, 0, 5, 7));
+        }
+        1 => {
+            // rs2=x0: the zero source participates normally in the RMW.
+            gen_atomic_setup(out, slot, false);
+            out.push(atomic_insn(0x01, 0b10, false, 9, 5, 0));
+        }
+        2 => {
+            // rd=rs2: the source must be captured before the old value is written.
+            gen_atomic_setup(out, slot, false);
+            out.push(atomic_insn(0x00, 0b01, false, 7, 5, 7));
+        }
+        3 => {
+            // rd=rs1: the effective address must be captured before rd changes.
+            gen_atomic_setup(out, slot, true);
+            out.push(atomic_insn(0x04, 0b11, true, 5, 5, 7));
+        }
+        4 => {
+            // rs2=rs1: store the address value itself into the selected word.
+            gen_atomic_setup(out, slot, true);
+            out.push(atomic_insn(0x01, 0, true, 9, 5, 5));
+        }
+        5 => {
+            // Adjacent LR.W/SC.W: normal success path with acquire/release bits.
+            gen_atomic_setup(out, slot, false);
+            out.push(atomic_insn(0x02, 0b10, false, 9, 5, 0));
+            out.push(atomic_insn(0x03, 0b01, false, 10, 5, 7));
+        }
+        6 => {
+            // Adjacent LR.D/SC.D with both ordering bits set.
+            gen_atomic_setup(out, slot, true);
+            out.push(atomic_insn(0x02, 0b11, true, 9, 5, 0));
+            out.push(atomic_insn(0x03, 0b11, true, 10, 5, 7));
+        }
+        7 => {
+            // LR rd=x0 must still establish a reservation used by the SC.
+            gen_atomic_setup(out, slot, false);
+            out.push(atomic_insn(0x02, 0b01, false, 0, 5, 0));
+            out.push(atomic_insn(0x03, 0b10, false, 10, 5, 7));
+        }
+        8 => {
+            // SC rd=x0 must still update memory and consume the reservation.
+            gen_atomic_setup(out, slot, false);
+            out.push(atomic_insn(0x02, 0, false, 9, 5, 0));
+            out.push(atomic_insn(0x03, 0b11, false, 0, 5, 7));
+            out.push(i_type(0x03, 10, 0b010, 5, 0)); // lw a0, 0(t0)
+        }
+        9 => {
+            // Every SC consumes the reservation; a second SC must fail.
+            gen_atomic_setup(out, slot, true);
+            out.push(atomic_insn(0x02, 0b10, true, 9, 5, 0));
+            out.push(atomic_insn(0x03, 0b01, true, 10, 5, 7));
+            out.push(atomic_insn(0x03, 0, true, 11, 5, 6));
+        }
+        10 => {
+            // A mapped SC without a preceding LR must fail and leave RAM intact.
+            gen_atomic_setup(out, slot, false);
+            out.push(atomic_insn(0x03, 0, false, 9, 5, 7));
+        }
+        _ => {
+            // SC rd=rs1: the effective address must be captured before the
+            // success status overwrites the address register.
+            gen_atomic_setup(out, slot, true);
+            out.push(atomic_insn(0x02, 0b10, true, 9, 5, 0));
+            out.push(atomic_insn(0x03, 0b01, true, 5, 5, 7));
+        }
+    }
+}
+
 fn gen_csr_trap(rng: &mut Rng, out: &mut Vec<u32>) {
     match rng.next_u64() % 23 {
         0 => gen_csr_alias_set(out),
@@ -742,6 +897,143 @@ mod tests {
         assert_eq!(Suite::parse("rvc"), Some(Suite::Compressed));
         assert_eq!(Suite::parse("c"), Some(Suite::Compressed));
         assert_eq!(Suite::Compressed.name(), "rv64c");
+    }
+
+    #[test]
+    fn atomics_suite_names_parse() {
+        assert_eq!(Suite::parse("atomic"), Some(Suite::Atomics));
+        assert_eq!(Suite::parse("atomics"), Some(Suite::Atomics));
+        assert_eq!(Suite::parse("rv64a"), Some(Suite::Atomics));
+        assert_eq!(Suite::parse("lrsc"), Some(Suite::Atomics));
+        assert_eq!(Suite::Atomics.name(), "rv64a-directed");
+    }
+
+    #[test]
+    fn atomic_matrix_covers_every_amo_width_and_ordering_encoding() {
+        let mut seen = [[[false; 4]; 2]; ATOMIC_AMO_FUNCTS.len()];
+
+        for selector in 0..ATOMIC_AMO_CASES {
+            let mut words = Vec::new();
+            gen_atomic_case(selector, selector, &mut words);
+
+            let funct_index = selector / 8;
+            let dbl_index = (selector / 4) & 1;
+            let aqrl = selector & 3;
+            let raw = *words.last().unwrap();
+            let insn = decode::decode(raw);
+            assert_eq!(insn.op, Op::Amo, "selector {selector}");
+            assert_eq!(
+                usize::from(insn.funct),
+                ATOMIC_AMO_FUNCTS[funct_index] as usize
+            );
+            assert_eq!(usize::from(insn.dbl), dbl_index);
+            assert_eq!(((raw >> 25) & 3) as usize, aqrl);
+            assert_eq!((insn.rd, insn.rs1, insn.rs2), (9, 5, 7));
+
+            let address = decode::decode(words[0]);
+            assert_eq!(address.op, Op::Addi);
+            assert_eq!((address.rd, address.rs1), (5, 8));
+            assert_eq!(address.imm, atomic_slot_offset(selector, insn.dbl));
+            assert_eq!(address.imm.rem_euclid(8), if insn.dbl { 0 } else { 4 });
+
+            let initial_store = decode::decode(words[words.len() - 2]);
+            assert_eq!(initial_store.op, if insn.dbl { Op::Sd } else { Op::Sw });
+            assert_eq!((initial_store.rs1, initial_store.rs2), (5, 6));
+            assert_eq!(initial_store.imm, 0);
+
+            seen[funct_index][dbl_index][aqrl] = true;
+        }
+
+        assert!(seen.into_iter().flatten().flatten().all(|covered| covered));
+    }
+
+    #[test]
+    fn atomic_directed_cases_cover_aliases_and_lrsc() {
+        for directed in 0..12 {
+            let selector = ATOMIC_AMO_CASES + directed;
+            let mut words = Vec::new();
+            gen_atomic_case(selector, directed, &mut words);
+            let atomics: Vec<_> = words
+                .iter()
+                .copied()
+                .map(decode::decode)
+                .filter(|insn| matches!(insn.op, Op::Amo | Op::Lr | Op::Sc))
+                .collect();
+            assert!(!atomics.is_empty(), "directed selector {directed}");
+            assert!(atomics.iter().all(|insn| insn.rs1 == 5));
+            assert!(atomics.iter().all(|insn| insn.op != Op::Illegal));
+
+            for word in words.iter().copied().map(decode::decode) {
+                if matches!(
+                    word.op,
+                    Op::Addi
+                        | Op::Slli
+                        | Op::Srli
+                        | Op::Lui
+                        | Op::Lw
+                        | Op::Ld
+                        | Op::Lr
+                        | Op::Sc
+                        | Op::Amo
+                ) {
+                    assert!(!matches!(word.rd, 8 | 27));
+                }
+            }
+
+            match directed {
+                0 => assert_eq!(atomics[0].rd, 0),
+                1 => assert_eq!(atomics[0].rs2, 0),
+                2 => assert_eq!((atomics[0].rd, atomics[0].rs2), (7, 7)),
+                3 => assert_eq!((atomics[0].rd, atomics[0].rs1), (5, 5)),
+                4 => assert_eq!((atomics[0].rs1, atomics[0].rs2), (5, 5)),
+                5 | 6 => assert!(
+                    matches!(atomics.as_slice(), [lr, sc] if lr.op == Op::Lr && sc.op == Op::Sc)
+                ),
+                7 => {
+                    assert_eq!(atomics[0].op, Op::Lr);
+                    assert_eq!(atomics[0].rd, 0);
+                    assert_eq!(atomics[1].op, Op::Sc);
+                }
+                8 => {
+                    assert_eq!(atomics[0].op, Op::Lr);
+                    assert_eq!(atomics[1].op, Op::Sc);
+                    assert_eq!(atomics[1].rd, 0);
+                    assert_eq!(decode::decode(*words.last().unwrap()).op, Op::Lw);
+                }
+                9 => assert!(matches!(atomics.as_slice(), [lr, first, second]
+                        if lr.op == Op::Lr && first.op == Op::Sc && second.op == Op::Sc)),
+                10 => assert_eq!(atomics[0].op, Op::Sc),
+                _ => {
+                    assert!(matches!(atomics.as_slice(), [lr, sc]
+                            if lr.op == Op::Lr && sc.op == Op::Sc));
+                    assert_eq!((atomics[1].rd, atomics[1].rs1), (5, 5));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn atomic_generator_cycles_through_full_amo_matrix() {
+        let mut seen = [[[false; 4]; 2]; ATOMIC_AMO_FUNCTS.len()];
+
+        let mut rng = Rng::new(1);
+        for raw in generate_block(&mut rng, Suite::Atomics, 1024) {
+            let insn = decode::decode(raw);
+            if insn.op != Op::Amo {
+                continue;
+            }
+            let Some(funct_index) = ATOMIC_AMO_FUNCTS
+                .iter()
+                .position(|&funct| funct == u32::from(insn.funct))
+            else {
+                panic!("unexpected AMO function {:#x}", insn.funct);
+            };
+            let dbl_index = usize::from(insn.dbl);
+            let aqrl = ((raw >> 25) & 3) as usize;
+            seen[funct_index][dbl_index][aqrl] = true;
+        }
+
+        assert!(seen.into_iter().flatten().flatten().all(|covered| covered));
     }
 
     #[test]
