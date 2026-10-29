@@ -330,25 +330,26 @@ fn gen_csr_trap(rng: &mut Rng) -> u32 {
     let rd = rng.pick_gpr();
     let rs1 = rng.pick_src_gpr();
     match rng.next_u64() % 18 {
-        // Safe CSR reads/writes & WARL probing
+        // Safe CSR reads/writes. Keep WLRL/WARL values portable across
+        // implementations so exact-value differential comparison is meaningful.
         0 => i_type(0x73, rd, 0b001, rs1, 0x340), // csrrw rd, mscratch, rs1
         1 => i_type(0x73, rd, 0b010, rs1, 0x340), // csrrs rd, mscratch, rs1
         2 => i_type(0x73, rd, 0b011, rs1, 0x340), // csrrc rd, mscratch, rs1
         3 => i_type(0x73, rd, 0b001, rs1, 0x140), // csrrw rd, sscratch, rs1
         4 => i_type(0x73, rd, 0b001, rs1, 0x001), // csrrw rd, fflags, rs1
-        5 => i_type(0x73, rd, 0b001, rs1, 0x002), // csrrw rd, frm, rs1
-        6 => i_type(0x73, rd, 0b001, rs1, 0x003), // csrrw rd, fcsr, rs1
+        5 => i_type(0x73, rd, 0b101, 0, 0x002),   // csrrwi rd, frm, RNE
+        6 => i_type(0x73, rd, 0b101, 0, 0x003),   // csrrwi rd, fcsr, 0
         // mvendorid, marchid, mimpid, and misa are deliberately excluded: their
         // values legitimately differ between rivemu and QEMU. mhartid is safe for -smp 1.
         7 => i_type(0x73, rd, 0b010, 0, 0xf14), // csrr rd, mhartid
-        8 => i_type(0x73, rd, 0b001, rs1, 0x142), // csrrw rd, scause, rs1
+        8 => i_type(0x73, rd, 0b101, 2, 0x142), // csrrwi rd, scause, illegal-insn
         9 => i_type(0x73, rd, 0b010, rs1, 0x001), // csrrs rd, fflags, rs1
-        10 => i_type(0x73, rd, 0b001, rs1, 0x143), // csrrw rd, stval, rs1
+        10 => i_type(0x73, rd, 0b101, 0, 0x143), // csrrwi rd, stval, 0
         11 => i_type(0x73, rd, 0b010, rs1, 0x140), // csrrs rd, sscratch, rs1
-        12 => i_type(0x73, rd, 0b001, rs1, 0x341), // csrrw rd, mepc, rs1
-        13 => i_type(0x73, rd, 0b001, rs1, 0x141), // csrrw rd, sepc, rs1
-        14 => i_type(0x73, rd, 0b001, rs1, 0x105), // csrrw rd, stvec, rs1
-        15 => i_type(0x73, rd, 0b001, rs1, 0x180), // csrrw rd, satp, rs1
+        12 => i_type(0x73, rd, 0b101, 0, 0x341), // csrrwi rd, mepc, 0
+        13 => i_type(0x73, rd, 0b101, 0, 0x141), // csrrwi rd, sepc, 0
+        14 => i_type(0x73, rd, 0b101, 0, 0x105), // csrrwi rd, stvec, direct@0
+        15 => i_type(0x73, rd, 0b101, 0, 0x180), // csrrwi rd, satp, bare
         // Synchronous traps caught by our M-mode handler at mtvec = 0x8000_2000:
         16 => 0x0000_0073, // ecall (from M-mode -> mcause = 11, mtval = 0)
         _ => 0x0000_7003,  // illegal 32-bit instruction (LOAD with reserved funct3 = 0b111)

@@ -1,0 +1,411 @@
+--- a/c_emulator/gdb/README.md
++++ b/c_emulator/gdb/README.md
+@@ -64,8 +64,15 @@
+ 
+ ## Known limitations
+ 
+-Access to vector registers and CSRs is currently not supported.
++Access to vector registers is currently not supported.  A versioned
++Sail-specific extension exposes the current privilege and the core machine and
++supervisor trap/control CSRs through `p` and `P` packets.  Clients can detect it
++from `sail-riscv-debug-v1+` in the `qSupported` response and fetch its stable
++register map from `qXfer:features:read:sail-riscv-debug.xml`.
+ 
++Memory can be written with either the binary `X` packet or the hexadecimal `M`
++packet.
++
+ ## Reporting issues
+ 
+ Please run the simulator with `--trace-gdbserver` and share the trace
+--- a/c_emulator/gdb/parse_utils.cpp
++++ b/c_emulator/gdb/parse_utils.cpp
+@@ -12,3 +12,22 @@
+   }
+   return std::nullopt;
+ }
++
++std::optional<uint64_t> little_endian_hex_to_opt_uint64t(const std::string &str) {
++  if (str.empty() || (str.size() % 2) != 0 || str.size() > 2 * sizeof(uint64_t)) {
++    return std::nullopt;
++  }
++
++  uint64_t result = 0;
++  for (size_t byte_idx = 0; byte_idx < str.size() / 2; ++byte_idx) {
++    uint8_t byte = 0;
++    const char *begin = str.data() + byte_idx * 2;
++    const char *end = begin + 2;
++    auto [ptr, ec] = std::from_chars(begin, end, byte, 16);
++    if (ec != std::errc() || ptr != end) {
++      return std::nullopt;
++    }
++    result |= static_cast<uint64_t>(byte) << (byte_idx * 8);
++  }
++  return result;
++}
+--- a/c_emulator/gdb/parse_utils.h
++++ b/c_emulator/gdb/parse_utils.h
+@@ -5,3 +5,8 @@
+ #include <string>
+ 
+ std::optional<uint64_t> string_to_opt_uint64t(const std::string &istr);
++
++// Decode register bytes as transmitted by RSP for a little-endian target.
++// Each byte is represented by two hexadecimal characters, least-significant
++// byte first.  Returns no value for malformed or over-wide inputs.
++std::optional<uint64_t> little_endian_hex_to_opt_uint64t(const std::string &str);
+--- a/c_emulator/gdb/requests.cpp
++++ b/c_emulator/gdb/requests.cpp
+@@ -285,7 +285,10 @@
+     uint64_t regval{};
+     {
+       auto val_str = cmd.substr(last_idx, idx - last_idx);
+-      auto opt_val = string_to_opt_uint64t(val_str);
++      // Register data in RSP is encoded in target byte order.  The Sail
++      // RISC-V model is little-endian, so P20=7856341200000000 writes
++      // 0x12345678 rather than the numeric hexadecimal value of the text.
++      auto opt_val = little_endian_hex_to_opt_uint64t(val_str);
+       if (!opt_val.has_value()) {
+         return std::nullopt;
+       }
+@@ -340,6 +343,70 @@
+       length = opt_length.value();
+     }
+     return response_handler_ptr(new response::read_memory(addr, length));
++  }
++};
++
++class write_hex_data : public request::request_parser {
++public:
++  write_hex_data() = default;
++
++  // M addr,length:XX...
++  // `length` is in bytes and `XX...` contains two hexadecimal digits per byte.
++  std::optional<response_handler_ptr> parse(const std::string &cmd, gdb_run_info &info) const override {
++    std::string tag{"M"};
++    auto idx = cmd.find(tag);
++    if (idx != 0) {
++      return std::nullopt;
++    }
++    idx += tag.length();
++    auto last_idx = idx;
++    idx = cmd.find(',', last_idx);
++    if (idx == std::string::npos) {
++      return std::nullopt;
++    }
++
++    auto opt_addr = string_to_opt_uint64t(cmd.substr(last_idx, idx - last_idx));
++    if (!opt_addr.has_value()) {
++      return std::nullopt;
++    }
++
++    ++idx;
++    last_idx = idx;
++    idx = cmd.find(':', last_idx);
++    if (idx == std::string::npos) {
++      return std::nullopt;
++    }
++    auto opt_length = string_to_opt_uint64t(cmd.substr(last_idx, idx - last_idx));
++    if (!opt_length.has_value()) {
++      return std::nullopt;
++    }
++
++    ++idx;
++    const std::string hex = cmd.substr(idx);
++    if ((hex.size() % 2) != 0 || opt_length.value() != hex.size() / 2) {
++      if (info.enable_trace) {
++        fprintf(
++          info.trace_log,
++          "write_hex_data: packet specifies %" PRIu64 " bytes but contains %zu hexadecimal characters\n",
++          opt_length.value(),
++          hex.size()
++        );
++      }
++      return std::nullopt;
++    }
++
++    std::string data;
++    data.reserve(hex.size() / 2);
++    for (size_t i = 0; i < hex.size(); i += 2) {
++      auto opt_byte = string_to_opt_uint64t(hex.substr(i, 2));
++      if (!opt_byte.has_value()) {
++        return std::nullopt;
++      }
++      data.push_back(static_cast<char>(opt_byte.value()));
++    }
++    return response_handler_ptr(
++      new response::write_binary_data(opt_addr.value(), opt_length.value(), std::move(data))
++    );
+   }
+ };
+ 
+@@ -594,6 +661,7 @@
+   parsers.push_back(request_parser_ptr(new write_register()));
+   parsers.push_back(request_parser_ptr(new qXfer_features_read()));
+   parsers.push_back(request_parser_ptr(new read_memory()));
++  parsers.push_back(request_parser_ptr(new write_hex_data()));
+   parsers.push_back(request_parser_ptr(new single_step()));
+   parsers.push_back(request_parser_ptr(new write_binary_data()));
+   parsers.push_back(request_parser_ptr(new forward_continue()));
+--- a/c_emulator/gdb/responses.cpp
++++ b/c_emulator/gdb/responses.cpp
+@@ -57,6 +57,10 @@
+   // `QStartNoAckMode+` in its response to `qSupported`."
+   resp.append(";");
+   resp.append("QStartNoAckMode+");
++  // Version marker for the compact privileged-state p/P register extension
++  // described by qXfer:features:read:sail-riscv-debug.xml.
++  resp.append(";");
++  resp.append("sail-riscv-debug-v1+");
+   proto_handler.send_response(resp);
+ }
+ 
+@@ -139,9 +143,15 @@
+ }
+ 
+ void qXfer_features_read::dispatch(protocol_handler &proto_handler, gdb_run_info &info) {
++  ModelImpl &model = proto_handler.get_model();
++  std::string xml;
+   if (m_annex == "target.xml") {
+-    ModelImpl &model = proto_handler.get_model();
+-    auto xml = get_target_xml(model);
++    xml = get_target_xml(model);
++  } else if (m_annex == "sail-riscv-debug.xml") {
++    xml = get_debug_target_xml(model);
++  }
++
++  if (!xml.empty()) {
+     std::ostringstream buf;
+     if (m_offset + m_length < xml.length()) {
+       buf << "m" << xml.substr(m_offset, m_length);
+--- a/c_emulator/gdb/target_regs.cpp
++++ b/c_emulator/gdb/target_regs.cpp
+@@ -17,6 +17,48 @@
+   return map;
+ }
+ 
++const std::vector<debug_register> &get_debug_registers() {
++  // Keep register numbers stable: 0-65 retain the upstream map and this
++  // versioned extension is a compact p/P-only range beginning at 66.
++  static const std::vector<debug_register> registers = {
++    {66, "priv", debug_register_kind::Privilege, 0x000},
++    {67, "mtvec", debug_register_kind::Csr, 0x305},
++    {68, "mstatus", debug_register_kind::Csr, 0x300},
++    {69, "mepc", debug_register_kind::Csr, 0x341},
++    {70, "mcause", debug_register_kind::Csr, 0x342},
++    {71, "mtval", debug_register_kind::Csr, 0x343},
++    {72, "sstatus", debug_register_kind::Csr, 0x100},
++    {73, "sepc", debug_register_kind::Csr, 0x141},
++    {74, "scause", debug_register_kind::Csr, 0x142},
++    {75, "stval", debug_register_kind::Csr, 0x143},
++    {76, "satp", debug_register_kind::Csr, 0x180},
++    {77, "stvec", debug_register_kind::Csr, 0x105},
++    {78, "mscratch", debug_register_kind::Csr, 0x340},
++    {79, "sscratch", debug_register_kind::Csr, 0x140},
++    {80, "medeleg", debug_register_kind::Csr, 0x302},
++    {81, "mideleg", debug_register_kind::Csr, 0x303},
++    {82, "senvcfg", debug_register_kind::Csr, 0x10a},
++  };
++  return registers;
++}
++
++std::string get_debug_target_xml(const ModelImpl &model) {
++  std::ostringstream xml;
++  xml << R"(<?xml version="1.0"?>
++<!DOCTYPE target SYSTEM "gdb-target.dtd">
++<target version="1.0">
++<feature name="org.riscv.sail.debug.v1">
++)";
++  for (const auto &reg : get_debug_registers()) {
++    const int bitsize = reg.kind == debug_register_kind::Privilege ? 8 : model.xlen();
++    xml << "  <reg name=\"" << reg.name << "\" bitsize=\"" << bitsize
++        << "\" type=\"int\" save-restore=\"yes\" group=\"system\" regnum=\"" << reg.regnum << "\"/>"
++        << std::endl;
++  }
++  xml << "</feature>\n</target>\n";
++  return xml.str();
++}
++
+ std::string get_target_xml(const ModelImpl &model) {
+   const register_map map = get_register_map();
+   std::ostringstream xml;
+@@ -169,7 +211,22 @@
+       append_reg(buf, val, float_width_bytes);
+     }
+   } else {
+-    buf << "E.invalid_register_idx";
++    bool found = false;
++    for (const auto &reg : get_debug_registers()) {
++      if (reg.regnum != regidx) {
++        continue;
++      }
++      found = true;
++      if (reg.kind == debug_register_kind::Privilege) {
++        append_reg(buf, model.privilege(), 1);
++      } else {
++        append_reg(buf, model.csr(reg.csr_address), int_width_bytes);
++      }
++      break;
++    }
++    if (!found) {
++      buf << "E.invalid_register_idx";
++    }
+   }
+   return buf.str();
+ }
+@@ -191,7 +248,26 @@
+       model.set_freg(reg, val);
+     }
+   } else {
+-    return "E.invalid_register_idx";
++    bool found = false;
++    for (const auto &debug_reg : get_debug_registers()) {
++      if (debug_reg.regnum != regidx) {
++        continue;
++      }
++      found = true;
++      if (debug_reg.kind == debug_register_kind::Privilege) {
++        if (!model.set_privilege(val)) {
++          return "E.invalid_privilege";
++        }
++      } else {
++        if (!model.set_csr(debug_reg.csr_address, val)) {
++          return "E.invalid_csr_value";
++        }
++      }
++      break;
++    }
++    if (!found) {
++      return "E.invalid_register_idx";
++    }
+   }
+ 
+   return "OK";
+--- a/c_emulator/gdb/target_regs.h
++++ b/c_emulator/gdb/target_regs.h
+@@ -2,6 +2,7 @@
+ 
+ #include <cstdint>
+ #include <string>
++#include <vector>
+ 
+ class ModelImpl;
+ class protocol_handler;
+@@ -20,6 +21,27 @@
+ 
+ register_map get_register_map();
+ 
++enum class debug_register_kind {
++  Privilege,
++  Csr,
++};
++
++struct debug_register {
++  uint64_t regnum;
++  const char *name;
++  debug_register_kind kind;
++  uint16_t csr_address;
++};
++
++// Version 1 of Sail's p/P-only privileged-state extension.  These registers
++// are intentionally not appended to the `g` reply, preserving its upstream
++// layout and length.
++const std::vector<debug_register> &get_debug_registers();
++
++// Describes the p/P-only extension served as
++// qXfer:features:read:sail-riscv-debug.xml.
++std::string get_debug_target_xml(const ModelImpl &model);
++
+ // Generates the response for `qXfer:features:read:target.xml`.
+ std::string get_target_xml(const ModelImpl &model);
+ 
+--- a/c_emulator/riscv_model_impl.cpp
++++ b/c_emulator/riscv_model_impl.cpp
+@@ -736,6 +736,14 @@
+   assert(m_has_float_registers);
+ 
+   return zfcsr.zbits;
++}
++
++uint64_t ModelImpl::privilege() {
++  return zprivLevel_to_bits(zcur_privilege);
++}
++
++uint64_t ModelImpl::csr(uint16_t reg) {
++  return zread_CSR(reg).bits;
+ }
+ 
+ uint64_t ModelImpl::htif_exit_code() const {
+@@ -788,10 +796,10 @@
+ }
+ 
+ void ModelImpl::set_pc(uint64_t val) {
+-  sbits sail_val;
+-  sail_val.len = zPC.len;
+-  sail_val.bits = val;
+-  (void)zset_next_pc(sail_val);
++  // A debugger writes the current architectural PC.  set_next_pc() changes
++  // only nextPC, which the next step overwrites from PC before committing it.
++  zPC.bits = val;
++  znextPC.bits = val;
+ }
+ 
+ void ModelImpl::set_fcsr(uint64_t val) {
+@@ -803,4 +811,38 @@
+ 
+   // Writing this CSR has side-effects: it dirties the FD context.
+   zwrite_fcsr(frm, fflags);
++}
++
++bool ModelImpl::set_privilege(uint64_t val) {
++  switch (val) {
++  case 0:
++    zcur_privilege = hart::zUser;
++    return true;
++  case 1:
++    zcur_privilege = hart::zSupervisor;
++    return true;
++  case 3:
++    zcur_privilege = hart::zMachine;
++    return true;
++  default:
++    return false;
++  }
+ }
++
++bool ModelImpl::set_csr(uint16_t reg, uint64_t val) {
++  sbits sail_val;
++  sail_val.len = zxlen;
++  sail_val.bits = val;
++
++  // write_CSR returns a generated result whose successful arm owns an lbits.
++  // Initialize it to the unit error arm and release the successful value after
++  // the CSR's normal WARL/WLRL legalization has run.
++  hart::zresultzIbzCuzK result{};
++  result.kind = hart::Kind_zErrzIbzCuzK;
++  zwrite_CSR(&result, reg, sail_val);
++  if (result.kind == hart::Kind_zOkzIbzCuzK) {
++    KILL(lbits)(&result.variants.zOkzIbzCuzK);
++    return true;
++  }
++  return false;
++}
+--- a/c_emulator/riscv_model_impl.h
++++ b/c_emulator/riscv_model_impl.h
+@@ -117,6 +117,8 @@
+   bool had_exception() const;
+   uint64_t pc() const;
+   uint64_t fcsr() const;
++  uint64_t privilege();
++  uint64_t csr(uint16_t reg);
+ 
+   // These state accessors are not const due to the generated read
+   // accessors not being marked const in hart::Model.
+@@ -131,6 +133,8 @@
+   void set_freg(int64_t reg, uint64_t val);
+   void set_pc(uint64_t val);
+   void set_fcsr(uint64_t val);
++  bool set_privilege(uint64_t val);
++  bool set_csr(uint16_t reg, uint64_t val);
+ 
+   // RVFI support
+ 

@@ -158,6 +158,14 @@ impl QemuGdbTarget {
 }
 
 impl CosimTarget for QemuGdbTarget {
+    fn name(&self) -> &'static str {
+        "QEMU"
+    }
+
+    fn supports_privileged_state(&self) -> bool {
+        true
+    }
+
     fn load_ram(&mut self, gpa: u64, data: &[u8]) -> Result<(), TargetError> {
         // Chunk writes into 2 KiB slices to stay well within GDB packet limits.
         for (i, chunk) in data.chunks(2048).enumerate() {

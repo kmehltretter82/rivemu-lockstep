@@ -57,18 +57,17 @@ pub const EBREAK: u32 = 0x0010_0073;
 pub const NOP: u32 = 0x0000_0013;
 
 /// Builds a deterministic M-mode trap handler (for `mtvec = 0x8000_2000`) that:
-/// 1. Mixes `mcause`, `mtval`, and `mepc` into signature register `s11` (`x27`) using `t1` (`x6`).
-/// 2. Advances `mepc` by `+4` (or `+2` for compressed 16-bit instructions) and executes `mret`.
+/// 1. Mixes `mcause` and `mepc` into signature register `s11` (`x27`) using `t1` (`x6`).
+/// 2. Advances `mepc` by `+4` (all generated trapping instructions are 32-bit) and executes `mret`.
+///
+/// `mtval` is deliberately excluded: for an illegal-instruction exception, a
+/// conforming implementation may report either zero or instruction bits.
 pub fn build_trap_handler() -> Vec<u8> {
     let insns: &[u32] = &[
         // csrr t1, mcause (0x342)
         i_type(0x73, 6, 0b010, 0, 0x342),
         // slli s11, s11, 7
         i_type(0x13, 27, 0b001, 27, 7),
-        // xor s11, s11, t1
-        r_type(0x33, 27, 0b100, 27, 6, 0x00),
-        // csrr t1, mtval (0x343)
-        i_type(0x73, 6, 0b010, 0, 0x343),
         // xor s11, s11, t1
         r_type(0x33, 27, 0b100, 27, 6, 0x00),
         // csrr t1, mepc (0x341)

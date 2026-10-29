@@ -153,8 +153,10 @@ pub fn run_firmware_lockstep(
                 insn_word,
                 decoded,
                 pre_state,
-                rivemu_post,
-                qemu_post,
+                candidate_name: rivemu.name(),
+                reference_name: qemu.name(),
+                candidate_post: rivemu_post,
+                reference_post: qemu_post,
                 diffs,
             }));
         }

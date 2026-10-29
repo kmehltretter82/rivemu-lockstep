@@ -23,7 +23,7 @@ pub const FREG_NAMES: [&str; 32] = [
     "fs10", "fs11", "ft8", "ft9", "ft10", "ft11",
 ];
 
-/// Complete architectural state compared at every lockstep checkpoint.
+/// Architectural state captured at lockstep checkpoints.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArchState {
     /// Program counter.
@@ -83,29 +83,29 @@ impl Default for ArchState {
 pub const MSTATUS_COMPARE_MASK: u64 = 0x0000_0000_007e_19aa;
 
 impl ArchState {
-    /// Compares two architectural states (`self` = `rivemu`, `other` = `QEMU`), returning all differences.
+    /// Compares candidate and reference architectural states, returning all differences.
     pub fn diff(&self, other: &Self, check_csrs: bool) -> Vec<FieldDiff> {
         let mut out = Vec::new();
         if self.pc != other.pc {
             out.push(FieldDiff {
                 name: "pc".into(),
-                rivemu: self.pc,
-                qemu: other.pc,
+                candidate: self.pc,
+                reference: other.pc,
             });
         }
         if check_csrs && self.prv != other.prv {
             out.push(FieldDiff {
                 name: "priv".into(),
-                rivemu: u64::from(self.prv),
-                qemu: u64::from(other.prv),
+                candidate: u64::from(self.prv),
+                reference: u64::from(other.prv),
             });
         }
         for (i, name) in XREG_NAMES.iter().enumerate().skip(1) {
             if self.x[i] != other.x[i] {
                 out.push(FieldDiff {
                     name: format!("x{i:<2} ({name})"),
-                    rivemu: self.x[i],
-                    qemu: other.x[i],
+                    candidate: self.x[i],
+                    reference: other.x[i],
                 });
             }
         }
@@ -113,16 +113,16 @@ impl ArchState {
             if self.f[i] != other.f[i] {
                 out.push(FieldDiff {
                     name: format!("f{i:<2} ({name})"),
-                    rivemu: self.f[i],
-                    qemu: other.f[i],
+                    candidate: self.f[i],
+                    reference: other.f[i],
                 });
             }
         }
         if (self.fcsr & 0xff) != (other.fcsr & 0xff) {
             out.push(FieldDiff {
                 name: "fcsr".into(),
-                rivemu: u64::from(self.fcsr & 0xff),
-                qemu: u64::from(other.fcsr & 0xff),
+                candidate: u64::from(self.fcsr & 0xff),
+                reference: u64::from(other.fcsr & 0xff),
             });
         }
         if check_csrs {
@@ -131,24 +131,25 @@ impl ArchState {
             if rm != qm {
                 out.push(FieldDiff {
                     name: "mstatus(masked)".into(),
-                    rivemu: self.mstatus,
-                    qemu: other.mstatus,
+                    candidate: self.mstatus,
+                    reference: other.mstatus,
                 });
             }
+            // Trap-value CSRs are not exact comparison fields: for some
+            // exceptions (notably illegal instruction), zero and faulting
+            // instruction/address information are both architecturally valid.
             for (name, rv, qv) in [
                 ("mepc", self.mepc, other.mepc),
                 ("mcause", self.mcause, other.mcause),
-                ("mtval", self.mtval, other.mtval),
                 ("sepc", self.sepc, other.sepc),
                 ("scause", self.scause, other.scause),
-                ("stval", self.stval, other.stval),
                 ("satp", self.satp, other.satp),
             ] {
                 if rv != qv {
                     out.push(FieldDiff {
                         name: name.into(),
-                        rivemu: rv,
-                        qemu: qv,
+                        candidate: rv,
+                        reference: qv,
                     });
                 }
             }
@@ -157,26 +158,26 @@ impl ArchState {
     }
 }
 
-/// A single register or CSR mismatch between `rivemu` and `QEMU`.
+/// A single register, CSR, or memory mismatch between candidate and reference.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FieldDiff {
     /// Register or CSR name.
     pub name: String,
-    /// Value observed in `rivemu`.
-    pub rivemu: u64,
-    /// Value observed in `QEMU`.
-    pub qemu: u64,
+    /// Value observed in the candidate implementation.
+    pub candidate: u64,
+    /// Value observed in the reference implementation.
+    pub reference: u64,
 }
 
 impl fmt::Display for FieldDiff {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "  {:<16} rivemu = {:#018x}   qemu = {:#018x}   (xor = {:#018x})",
+            "  {:<16} candidate = {:#018x}   reference = {:#018x}   (xor = {:#018x})",
             self.name,
-            self.rivemu,
-            self.qemu,
-            self.rivemu ^ self.qemu
+            self.candidate,
+            self.reference,
+            self.candidate ^ self.reference
         )
     }
 }
@@ -205,6 +206,19 @@ pub enum TargetError {
 
 /// Common interface implemented by both `RivemuTarget` and `QemuGdbTarget`.
 pub trait CosimTarget {
+    /// Human-readable implementation name used in diagnostics.
+    fn name(&self) -> &'static str;
+
+    /// Whether complete privileged state can be seeded and observed.
+    fn supports_privileged_state(&self) -> bool {
+        false
+    }
+
+    /// Whether execution can be rewound faithfully in the same target process.
+    fn supports_replay(&self) -> bool {
+        true
+    }
+
     /// Writes `data` into guest physical memory at `gpa`.
     fn load_ram(&mut self, gpa: u64, data: &[u8]) -> Result<(), TargetError>;
     /// Reads guest physical memory at `gpa` into `buf`.

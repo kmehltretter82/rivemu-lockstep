@@ -35,6 +35,14 @@ impl RivemuTarget {
 }
 
 impl CosimTarget for RivemuTarget {
+    fn name(&self) -> &'static str {
+        "rivemu"
+    }
+
+    fn supports_privileged_state(&self) -> bool {
+        true
+    }
+
     fn load_ram(&mut self, gpa: u64, data: &[u8]) -> Result<(), TargetError> {
         self.machine
             .bus

@@ -5,5 +5,5 @@ pub mod harness;
 pub mod seed;
 pub mod suite;
 
-pub use harness::{BisectReport, RisuHarness};
+pub use harness::{BisectReport, RisuCase, RisuHarness};
 pub use suite::Suite;

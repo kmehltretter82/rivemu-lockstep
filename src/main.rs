@@ -7,8 +7,31 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use rivemu_lockstep::lockstep::run_firmware_lockstep;
-use rivemu_lockstep::risu::{RisuHarness, Suite};
-use rivemu_lockstep::target::{QemuGdbTarget, RivemuTarget};
+use rivemu_lockstep::risu::{RisuCase, RisuHarness, Suite};
+use rivemu_lockstep::target::{QemuGdbTarget, RivemuTarget, SailGdbTarget};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RisuReference {
+    Sail,
+    Qemu,
+}
+
+impl RisuReference {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "sail" => Some(Self::Sail),
+            "qemu" => Some(Self::Qemu),
+            _ => None,
+        }
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Sail => "sail",
+            Self::Qemu => "qemu",
+        }
+    }
+}
 
 fn default_qemu() -> PathBuf {
     let brew = Path::new("/opt/homebrew/bin/qemu-system-riscv64");
@@ -19,6 +42,20 @@ fn default_qemu() -> PathBuf {
     }
 }
 
+fn default_sail() -> PathBuf {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for relative in [
+        "../third_party/sail-riscv-0.16-debug-v1/bin/sail_riscv_sim",
+        "../third_party/sail-riscv-0.16/bin/sail_riscv_sim",
+    ] {
+        let candidate = manifest.join(relative);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    PathBuf::from("sail_riscv_sim")
+}
+
 fn print_usage() {
     eprintln!(
         "\
@@ -27,13 +64,15 @@ Usage:
   rivemu-lockstep boot --bios <PATH> [--kernel <PATH>] [OPTIONS]
 
 RISU Options:
+  --reference <sail|qemu>                       Reference model [default: sail]
   --suite <alu|mul|bitmanip|float|mem|csr|all>   Instruction suite [default: all]
   --blocks <N>                                   Number of random blocks [default: 50]
   --insns <K>                                    Instructions per block [default: 32]
   --seed <HEX_OR_DEC>                            Starting PRNG seed [default: 0x1000]
   --check-csrs                                   Compare privileged CSRs at checkpoints
-  --step-check                                   Compare state and scratch RAM after every instruction
+  --step-check                                   Compare after every instruction [always on for Sail]
   --strict                                       Enable rivemu -strict mode
+  --sail <PATH>                                  Path to sail_riscv_sim
   --qemu <PATH>                                  Path to qemu-system-riscv64
 
 Early Boot CPU Smoke Options:
@@ -86,6 +125,8 @@ fn main() -> ExitCode {
     let mut check_csrs = false;
     let mut step_check = false;
     let mut strict = false;
+    let mut reference = RisuReference::Sail;
+    let mut sail_bin = default_sail();
     let mut qemu_bin = default_qemu();
     let mut bios: Option<PathBuf> = None;
     let mut kernel: Option<PathBuf> = None;
@@ -110,6 +151,14 @@ fn main() -> ExitCode {
     };
     while i < args.len() {
         match args[i].as_str() {
+            "--reference" => {
+                let value = value_or_exit!(option_value(&args, &mut i, "--reference"));
+                let Some(parsed) = RisuReference::parse(value) else {
+                    eprintln!("error: invalid value for --reference ('{value}')");
+                    return ExitCode::from(2);
+                };
+                reference = parsed;
+            }
             "--suite" => {
                 let value = value_or_exit!(option_value(&args, &mut i, "--suite"));
                 let Some(s) = Suite::parse(value) else {
@@ -134,6 +183,9 @@ fn main() -> ExitCode {
             "--check-csrs" => check_csrs = true,
             "--step-check" => step_check = true,
             "--strict" => strict = true,
+            "--sail" => {
+                sail_bin = PathBuf::from(value_or_exit!(option_value(&args, &mut i, "--sail")));
+            }
             "--qemu" => {
                 qemu_bin = PathBuf::from(value_or_exit!(option_value(&args, &mut i, "--qemu")));
             }
@@ -202,55 +254,110 @@ fn main() -> ExitCode {
         }
     } else {
         let t0 = Instant::now();
-        let rivemu = match RivemuTarget::new_bare(strict) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("error initializing rivemu: {e}");
-                return ExitCode::from(2);
-            }
-        };
-        let qemu = match QemuGdbTarget::spawn_bare(&qemu_bin) {
-            Ok(q) => q,
-            Err(e) => {
-                eprintln!("error spawning {}: {e}", qemu_bin.display());
-                return ExitCode::from(2);
-            }
-        };
-        let mut harness = match RisuHarness::new(rivemu, qemu, check_csrs) {
-            Ok(h) => h,
-            Err(e) => {
-                eprintln!("error setting up RISU harness: {e}");
-                return ExitCode::from(2);
-            }
-        };
-        harness.set_step_check(step_check);
+        let effective_step_check = step_check || reference == RisuReference::Sail;
+        match reference {
+            RisuReference::Qemu => {
+                let rivemu = match RivemuTarget::new_bare(strict) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        eprintln!("error initializing rivemu: {error}");
+                        return ExitCode::from(2);
+                    }
+                };
+                let qemu = match QemuGdbTarget::spawn_bare(&qemu_bin) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        eprintln!("error spawning {}: {error}", qemu_bin.display());
+                        return ExitCode::from(2);
+                    }
+                };
+                let mut harness = match RisuHarness::new(rivemu, qemu, check_csrs) {
+                    Ok(harness) => harness,
+                    Err(error) => {
+                        eprintln!("error setting up RISU harness: {error}");
+                        return ExitCode::from(2);
+                    }
+                };
+                harness.set_step_check(effective_step_check);
 
-        for b in 0..blocks {
-            let seed = start_seed.wrapping_add(b as u64);
-            match harness.run_seed(suite, seed, insns) {
-                Ok(None) => {}
-                Ok(Some(report)) => {
-                    println!(
-                        "Divergence found after {b}/{blocks} blocks ({:.2?}):",
-                        t0.elapsed()
-                    );
-                    print!("{report}");
-                    return ExitCode::from(1);
+                for block in 0..blocks {
+                    let seed = start_seed.wrapping_add(block as u64);
+                    match harness.run_seed(suite, seed, insns) {
+                        Ok(None) => {}
+                        Ok(Some(report)) => {
+                            println!(
+                                "Divergence found after {block}/{blocks} blocks ({:.2?}):",
+                                t0.elapsed()
+                            );
+                            print!("{report}");
+                            return ExitCode::from(1);
+                        }
+                        Err(error) => {
+                            eprintln!("error at block {block} (seed={seed:#x}): {error}");
+                            return ExitCode::from(2);
+                        }
+                    }
                 }
-                Err(e) => {
-                    eprintln!("error at block {b} (seed={seed:#x}): {e}");
-                    return ExitCode::from(2);
+            }
+            RisuReference::Sail => {
+                for block in 0..blocks {
+                    let seed = start_seed.wrapping_add(block as u64);
+                    let case = match RisuCase::generate(suite, seed, insns) {
+                        Ok(case) => case,
+                        Err(error) => {
+                            eprintln!("error generating block {block} (seed={seed:#x}): {error}");
+                            return ExitCode::from(2);
+                        }
+                    };
+                    let rivemu = match RivemuTarget::new_bare(strict) {
+                        Ok(target) => target,
+                        Err(error) => {
+                            eprintln!("error initializing rivemu: {error}");
+                            return ExitCode::from(2);
+                        }
+                    };
+                    let sail = match SailGdbTarget::spawn_case(&sail_bin, &case) {
+                        Ok(target) => target,
+                        Err(error) => {
+                            eprintln!("error spawning {}: {error}", sail_bin.display());
+                            return ExitCode::from(2);
+                        }
+                    };
+                    let mut harness = match RisuHarness::from_targets(rivemu, sail, check_csrs) {
+                        Ok(harness) => harness,
+                        Err(error) => {
+                            eprintln!("error setting up RISU harness: {error}");
+                            return ExitCode::from(2);
+                        }
+                    };
+                    harness.set_step_check(true);
+                    match harness.run_case(&case) {
+                        Ok(None) => {}
+                        Ok(Some(report)) => {
+                            println!(
+                                "Divergence found after {block}/{blocks} blocks ({:.2?}):",
+                                t0.elapsed()
+                            );
+                            print!("{report}");
+                            return ExitCode::from(1);
+                        }
+                        Err(error) => {
+                            eprintln!("error at block {block} (seed={seed:#x}): {error}");
+                            return ExitCode::from(2);
+                        }
+                    }
                 }
             }
         }
         println!(
-            "PASS: suite={} blocks={} requested_insns_per_block={} requested_insns_total={} start_seed={:#x} step_check={} elapsed={:.2?}",
+            "PASS: reference={} suite={} blocks={} requested_insns_per_block={} requested_insns_total={} start_seed={:#x} step_check={} elapsed={:.2?}",
+            reference.name(),
             suite.name(),
             blocks,
             insns,
             blocks * insns,
             start_seed,
-            step_check,
+            effective_step_check,
             t0.elapsed()
         );
         ExitCode::SUCCESS

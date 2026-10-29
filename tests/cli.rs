@@ -19,6 +19,11 @@ fn rejects_invalid_or_missing_option_values() {
             "invalid value for --blocks",
         ),
         (&["risu", "--qemu"][..], "--qemu requires a value"),
+        (&["risu", "--sail"][..], "--sail requires a value"),
+        (
+            &["risu", "--reference", "spike"][..],
+            "invalid value for --reference",
+        ),
         (&["boot", "--bios"][..], "--bios requires a value"),
     ] {
         let output = run(args);
