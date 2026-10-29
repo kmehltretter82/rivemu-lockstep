@@ -5,6 +5,7 @@ use std::fmt;
 use rivemu_cpu_riscv::decode;
 
 use crate::risu::encode::{EBREAK, build_trap_handler};
+use crate::risu::fp_edges;
 use crate::risu::seed::Rng;
 use crate::risu::suite::{Suite, generate_block, generate_compressed_block};
 use crate::target::{QemuGdbTarget, RivemuTarget};
@@ -62,7 +63,10 @@ impl RisuCase {
         }
 
         let mut rng = Rng::new(seed);
-        let init_state = rng.seed_state(CODE_BASE, SCRATCH_BASE);
+        let mut init_state = rng.seed_state(CODE_BASE, SCRATCH_BASE);
+        if suite == Suite::FpEdges {
+            fp_edges::configure_initial_state(&mut init_state);
+        }
         let (code_bytes, generated_insns) = if suite == Suite::Compressed {
             let insns = generate_compressed_block(&mut rng, num_insns);
             let mut bytes = Vec::with_capacity(insns.len() * 2 + 4);
@@ -727,6 +731,21 @@ mod tests {
         assert_eq!(first.scratch(), second.scratch());
         assert_eq!(first.end_pc(), second.end_pc());
         assert_eq!(first.max_steps(), second.max_steps());
+    }
+
+    #[test]
+    fn fp_edges_case_uses_known_operands_without_clobbering_reserved_gprs() {
+        let case = RisuCase::generate(Suite::FpEdges, 0x1234, 1).unwrap();
+        let state = case.init_state();
+
+        assert_eq!(state.x[8], SCRATCH_BASE);
+        assert_eq!(state.x[27], 0);
+        assert_eq!(state.f[5], 0x3ff0_0000_0000_0001);
+        assert_eq!(state.f[8], 0x3ca0_0000_0000_0000);
+        assert_eq!(state.f[19], 0x0000_0000_ff80_0001);
+        assert_eq!(state.f[20], 0xffff_ffff_4f00_0000);
+        assert_eq!(state.fcsr, 0);
+        assert!(!case.uses_scratch());
     }
 
     #[test]

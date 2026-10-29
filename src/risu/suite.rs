@@ -1,6 +1,7 @@
 //! Constrained-random instruction generators for each `RISU` verification suite.
 
 use crate::risu::encode::{EBREAK, b_type, i_type, j_type, r_type, r4_type, s_type, u_type};
+use crate::risu::fp_edges;
 use crate::risu::seed::Rng;
 
 /// Available `RISU` instruction fuzzing suites.
@@ -18,6 +19,8 @@ pub enum Suite {
     Bitmanip,
     /// IEEE-754 single (`F`) and double (`D`) floating-point arithmetic, conversions, and `fflags`.
     Float,
+    /// Directed floating-point NaN boxing, rounding, fused operations, and flags.
+    FpEdges,
     /// Sandboxed memory loads, stores, AMOs (`RV64A`), and `Zicbom`/`Zicboz` cache-block ops.
     SandboxMem,
     /// CSR WARL reads/writes and trap-handler recovery (`mtvec` signature checks).
@@ -26,7 +29,8 @@ pub enum Suite {
     Atomics,
     /// Legal, sequential RV64C integer and scratch-memory operations.
     Compressed,
-    /// Original mixed suites, excluding specialized [`Self::Atomics`] and [`Self::Compressed`].
+    /// Original mixed suites, excluding specialized [`Self::Atomics`], [`Self::FpEdges`],
+    /// and [`Self::Compressed`] suites.
     All,
 }
 
@@ -40,6 +44,7 @@ impl Suite {
             "mul" | "muldiv" | "m" => Some(Self::MulDiv),
             "bitmanip" | "zb" | "b" => Some(Self::Bitmanip),
             "float" | "fp" | "fd" => Some(Self::Float),
+            "fp-edges" | "fpedges" | "float-edges" => Some(Self::FpEdges),
             "mem" | "amo" | "sandboxmem" => Some(Self::SandboxMem),
             "csr" | "trap" | "csrtrap" => Some(Self::CsrTrap),
             "atomic" | "atomics" | "rv64a" | "lrsc" => Some(Self::Atomics),
@@ -58,6 +63,7 @@ impl Suite {
             Self::MulDiv => "mul-div",
             Self::Bitmanip => "bitmanip",
             Self::Float => "float-fd",
+            Self::FpEdges => "fp-directed",
             Self::SandboxMem => "sandbox-mem-amo",
             Self::CsrTrap => "csr-trap",
             Self::Atomics => "rv64a-directed",
@@ -73,6 +79,11 @@ pub fn generate_block(rng: &mut Rng, suite: Suite, num_insns: usize) -> Vec<u32>
     let mut atomic_slot = 0usize;
     let mut atomic_selector = if suite == Suite::Atomics {
         rng.index(ATOMIC_CASES)
+    } else {
+        0
+    };
+    let mut fp_edge_selector = if suite == Suite::FpEdges {
+        rng.index(fp_edges::CASE_COUNT)
     } else {
         0
     };
@@ -97,6 +108,10 @@ pub fn generate_block(rng: &mut Rng, suite: Suite, num_insns: usize) -> Vec<u32>
             Suite::MulDiv => out.push(gen_mul_div(rng)),
             Suite::Bitmanip => out.push(gen_bitmanip(rng)),
             Suite::Float => out.push(gen_float(rng)),
+            Suite::FpEdges => {
+                fp_edges::generate_case(fp_edge_selector, &mut out);
+                fp_edge_selector = (fp_edge_selector + 1) % fp_edges::CASE_COUNT;
+            }
             Suite::SandboxMem => gen_sandbox_mem(rng, &mut out),
             Suite::CsrTrap => gen_csr_trap(rng, &mut out),
             Suite::Atomics => {
@@ -906,6 +921,34 @@ mod tests {
         assert_eq!(Suite::parse("rv64a"), Some(Suite::Atomics));
         assert_eq!(Suite::parse("lrsc"), Some(Suite::Atomics));
         assert_eq!(Suite::Atomics.name(), "rv64a-directed");
+    }
+
+    #[test]
+    fn fp_edges_suite_names_parse() {
+        assert_eq!(Suite::parse("fp-edges"), Some(Suite::FpEdges));
+        assert_eq!(Suite::parse("fpedges"), Some(Suite::FpEdges));
+        assert_eq!(Suite::parse("float-edges"), Some(Suite::FpEdges));
+        assert_eq!(Suite::FpEdges.name(), "fp-directed");
+    }
+
+    #[test]
+    fn fp_edges_generator_cycles_without_splitting_snippets() {
+        let seed = 0x1234_5678;
+        let budget = 96;
+        let mut selector_rng = Rng::new(seed);
+        let mut selector = selector_rng.index(fp_edges::CASE_COUNT);
+        let mut expected = Vec::new();
+        while expected.len() < budget {
+            fp_edges::generate_case(selector, &mut expected);
+            selector = (selector + 1) % fp_edges::CASE_COUNT;
+        }
+        expected.push(EBREAK);
+
+        let mut actual_rng = Rng::new(seed);
+        assert_eq!(
+            generate_block(&mut actual_rng, Suite::FpEdges, budget),
+            expected
+        );
     }
 
     #[test]
