@@ -1,6 +1,6 @@
 //! Constrained-random instruction generators for each `RISU` verification suite.
 
-use crate::risu::encode::{EBREAK, i_type, r_type, r4_type, s_type, u_type};
+use crate::risu::encode::{EBREAK, b_type, i_type, j_type, r_type, r4_type, s_type, u_type};
 use crate::risu::seed::Rng;
 
 /// Available `RISU` instruction fuzzing suites.
@@ -8,6 +8,8 @@ use crate::risu::seed::Rng;
 pub enum Suite {
     /// RV64I base integer ALU and immediate operations.
     IntAlu,
+    /// RV64I branches, jumps, link semantics, and PC-relative address formation.
+    ControlFlow,
     /// RV64M 64-bit and 32-bit multiply, divide, and remainder operations.
     MulDiv,
     /// `Zba`, `Zbb`, `Zbc`, and `Zbs` bit-manipulation extensions.
@@ -27,6 +29,7 @@ impl Suite {
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "alu" | "int" | "intalu" => Some(Self::IntAlu),
+            "control" | "control-flow" | "branch" => Some(Self::ControlFlow),
             "mul" | "muldiv" | "m" => Some(Self::MulDiv),
             "bitmanip" | "zb" | "b" => Some(Self::Bitmanip),
             "float" | "fp" | "fd" => Some(Self::Float),
@@ -41,6 +44,7 @@ impl Suite {
     pub const fn name(self) -> &'static str {
         match self {
             Self::IntAlu => "int-alu",
+            Self::ControlFlow => "control-flow",
             Self::MulDiv => "mul-div",
             Self::Bitmanip => "bitmanip",
             Self::Float => "float-fd",
@@ -56,18 +60,20 @@ pub fn generate_block(rng: &mut Rng, suite: Suite, num_insns: usize) -> Vec<u32>
     let mut out = Vec::with_capacity(num_insns + 4);
     while out.len() < num_insns {
         let active = match suite {
-            Suite::All => match rng.next_u64() % 6 {
+            Suite::All => match rng.next_u64() % 7 {
                 0 => Suite::IntAlu,
-                1 => Suite::MulDiv,
-                2 => Suite::Bitmanip,
-                3 => Suite::Float,
-                4 => Suite::SandboxMem,
+                1 => Suite::ControlFlow,
+                2 => Suite::MulDiv,
+                3 => Suite::Bitmanip,
+                4 => Suite::Float,
+                5 => Suite::SandboxMem,
                 _ => Suite::CsrTrap,
             },
             other => other,
         };
         match active {
             Suite::IntAlu => out.push(gen_int_alu(rng)),
+            Suite::ControlFlow => gen_control_flow(rng, &mut out),
             Suite::MulDiv => out.push(gen_mul_div(rng)),
             Suite::Bitmanip => out.push(gen_bitmanip(rng)),
             Suite::Float => out.push(gen_float(rng)),
@@ -119,6 +125,87 @@ fn gen_int_alu(rng: &mut Rng) -> u32 {
         27 => i_type(0x1b, rd, 0b101, rs1, 0x400 | shamt5), // sraiw
         _ => u_type(0x37, rd, (rng.edge_u64() & 0xfffff) as u32), // lui
     }
+}
+
+fn gen_control_flow(rng: &mut Rng, out: &mut Vec<u32>) {
+    match rng.next_u64() % 10 {
+        branch @ 0..=5 => {
+            const BRANCH_FUNCT3: [u32; 6] = [0b000, 0b001, 0b100, 0b101, 0b110, 0b111];
+            let taken = (rng.next_u64() & 1) != 0;
+            let marker_rd = rng.pick_gpr();
+            gen_conditional_branch(out, BRANCH_FUNCT3[branch as usize], taken, marker_rd);
+        }
+        6 => {
+            let rd = if (rng.next_u64() & 3) == 0 {
+                0
+            } else {
+                rng.pick_gpr()
+            };
+            let marker_rd = rng.pick_gpr();
+            gen_jal_skip(out, rd, marker_rd);
+        }
+        7 => {
+            // Exercise both normal link registers and rd == rs1 aliasing.
+            let rd = match rng.next_u64() & 3 {
+                0 => 0,
+                1 => 5,
+                _ => rng.pick_gpr(),
+            };
+            let marker_rd = rng.pick_gpr();
+            gen_jalr_skip(out, rd, marker_rd);
+        }
+        8 => {
+            let rd = rng.pick_gpr();
+            out.push(u_type(0x17, rd, (rng.edge_u64() & 0x000f_ffff) as u32));
+        }
+        _ => gen_bounded_loop(out, ((rng.next_u64() & 3) + 1) as i32),
+    }
+}
+
+fn gen_conditional_branch(out: &mut Vec<u32>, funct3: u32, taken: bool, marker_rd: u8) {
+    // t0/t1 are reserved by the generator as control-flow and trap scratch.
+    // Set operands explicitly so every branch form is generated in both taken
+    // and not-taken configurations independent of the seeded register state.
+    let (lhs, rhs) = branch_operands(funct3, taken);
+    out.push(i_type(0x13, 5, 0b000, 0, lhs));
+    out.push(i_type(0x13, 6, 0b000, 0, rhs));
+    // A taken branch skips exactly one 32-bit marker and reconverges at the
+    // first instruction appended by the next snippet (or the final EBREAK).
+    out.push(b_type(0x63, funct3, 5, 6, 8));
+    out.push(i_type(0x13, marker_rd, 0b000, marker_rd, 1));
+}
+
+const fn branch_operands(funct3: u32, taken: bool) -> (i32, i32) {
+    match (funct3, taken) {
+        (0b000, true) | (0b001, false) => (1, 1), // beq / bne
+        (0b000, false) | (0b001, true) => (1, 2),
+        (0b100, true) | (0b101, false) => (-1, 1), // blt / bge
+        (0b100, false) | (0b101, true) => (1, -1),
+        (0b110, true) | (0b111, false) => (1, 2), // bltu / bgeu
+        (0b110, false) | (0b111, true) => (2, 1),
+        _ => (0, 0),
+    }
+}
+
+fn gen_jal_skip(out: &mut Vec<u32>, rd: u8, marker_rd: u8) {
+    out.push(j_type(0x6f, rd, 8));
+    out.push(i_type(0x13, marker_rd, 0b000, marker_rd, 1));
+}
+
+fn gen_jalr_skip(out: &mut Vec<u32>, rd: u8, marker_rd: u8) {
+    // AUIPC yields this snippet's PC. Adding 17 produces an odd address one
+    // byte beyond the desired target; JALR must clear bit 0 and land at +16.
+    out.push(u_type(0x17, 5, 0));
+    out.push(i_type(0x13, 5, 0b000, 5, 17));
+    out.push(i_type(0x67, rd, 0b000, 5, 0));
+    out.push(i_type(0x13, marker_rd, 0b000, marker_rd, 1));
+}
+
+fn gen_bounded_loop(out: &mut Vec<u32>, iterations: i32) {
+    debug_assert!((1..=4).contains(&iterations));
+    out.push(i_type(0x13, 5, 0b000, 0, iterations));
+    out.push(i_type(0x13, 5, 0b000, 5, -1));
+    out.push(b_type(0x63, 0b001, 5, 0, -4));
 }
 
 fn gen_mul_div(rng: &mut Rng) -> u32 {
@@ -353,5 +440,131 @@ fn gen_csr_trap(rng: &mut Rng) -> u32 {
         // Synchronous traps caught by our M-mode handler at mtvec = 0x8000_2000:
         16 => 0x0000_0073, // ecall (from M-mode -> mcause = 11, mtval = 0)
         _ => 0x0000_7003,  // illegal 32-bit instruction (LOAD with reserved funct3 = 0b111)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn decode_i_imm(word: u32) -> i32 {
+        (word as i32) >> 20
+    }
+
+    fn decode_b_imm(word: u32) -> i32 {
+        let bits = (((word >> 31) & 1) << 12)
+            | (((word >> 7) & 1) << 11)
+            | (((word >> 25) & 0x3f) << 5)
+            | (((word >> 8) & 0xf) << 1);
+        ((bits << 19) as i32) >> 19
+    }
+
+    fn decode_j_imm(word: u32) -> i32 {
+        let bits = (((word >> 31) & 1) << 20)
+            | (((word >> 12) & 0xff) << 12)
+            | (((word >> 20) & 1) << 11)
+            | (((word >> 21) & 0x3ff) << 1);
+        ((bits << 11) as i32) >> 11
+    }
+
+    fn branch_is_taken(funct3: u32, lhs: i64, rhs: i64) -> bool {
+        match funct3 {
+            0b000 => lhs == rhs,
+            0b001 => lhs != rhs,
+            0b100 => lhs < rhs,
+            0b101 => lhs >= rhs,
+            0b110 => (lhs as u64) < (rhs as u64),
+            0b111 => (lhs as u64) >= (rhs as u64),
+            _ => panic!("invalid branch funct3"),
+        }
+    }
+
+    #[test]
+    fn control_flow_suite_names_parse() {
+        assert_eq!(Suite::parse("control"), Some(Suite::ControlFlow));
+        assert_eq!(Suite::parse("control-flow"), Some(Suite::ControlFlow));
+        assert_eq!(Suite::parse("branch"), Some(Suite::ControlFlow));
+        assert_eq!(Suite::ControlFlow.name(), "control-flow");
+    }
+
+    #[test]
+    fn conditional_snippets_cover_every_branch_both_ways() {
+        for funct3 in [0b000, 0b001, 0b100, 0b101, 0b110, 0b111] {
+            for expected_taken in [false, true] {
+                let mut words = Vec::new();
+                gen_conditional_branch(&mut words, funct3, expected_taken, 7);
+
+                assert_eq!(words.len(), 4);
+                assert_eq!(words[2] & 0x7f, 0x63);
+                assert_eq!((words[2] >> 12) & 7, funct3);
+                assert_eq!((words[2] >> 15) & 0x1f, 5);
+                assert_eq!((words[2] >> 20) & 0x1f, 6);
+                assert_eq!(decode_b_imm(words[2]), 8);
+
+                let lhs = i64::from(decode_i_imm(words[0]));
+                let rhs = i64::from(decode_i_imm(words[1]));
+                assert_eq!(branch_is_taken(funct3, lhs, rhs), expected_taken);
+            }
+        }
+    }
+
+    #[test]
+    fn jump_snippets_skip_one_slot_and_test_jalr_bit_zero() {
+        let mut jal = Vec::new();
+        gen_jal_skip(&mut jal, 1, 7);
+        assert_eq!(jal.len(), 2);
+        assert_eq!(jal[0] & 0x7f, 0x6f);
+        assert_eq!((jal[0] >> 7) & 0x1f, 1);
+        assert_eq!(decode_j_imm(jal[0]), 8);
+
+        let mut jalr = Vec::new();
+        gen_jalr_skip(&mut jalr, 5, 7);
+        assert_eq!(jalr.len(), 4);
+        assert_eq!(jalr[0] & 0x7f, 0x17);
+        assert_eq!((jalr[0] >> 7) & 0x1f, 5);
+        assert_eq!(decode_i_imm(jalr[1]), 17);
+        assert_eq!(jalr[2] & 0x7f, 0x67);
+        assert_eq!((jalr[2] >> 7) & 0x1f, 5);
+        assert_eq!((jalr[2] >> 15) & 0x1f, 5);
+        let snippet_pc = 0x8000_0100u64;
+        assert_eq!((snippet_pc + 17) & !1, snippet_pc + 16);
+    }
+
+    #[test]
+    fn bounded_loop_has_a_small_backward_target() {
+        let mut words = Vec::new();
+        gen_bounded_loop(&mut words, 4);
+        assert_eq!(words.len(), 3);
+        assert_eq!(decode_i_imm(words[0]), 4);
+        assert_eq!(decode_i_imm(words[1]), -1);
+        assert_eq!((words[2] >> 12) & 7, 0b001);
+        assert_eq!(decode_b_imm(words[2]), -4);
+    }
+
+    #[test]
+    fn generated_control_flow_targets_remain_inside_the_block() {
+        for seed in 1..=64 {
+            let mut rng = Rng::new(seed);
+            let words = generate_block(&mut rng, Suite::ControlFlow, 64);
+            assert_eq!(words.last(), Some(&EBREAK));
+
+            for (index, &word) in words.iter().enumerate() {
+                let opcode = word & 0x7f;
+                let immediate = match opcode {
+                    0x63 => Some(decode_b_imm(word)),
+                    0x6f => Some(decode_j_imm(word)),
+                    _ => None,
+                };
+                if let Some(immediate) = immediate {
+                    let target = index as i64 * 4 + i64::from(immediate);
+                    assert_eq!(target & 3, 0);
+                    assert!((0..words.len() as i64 * 4).contains(&target));
+                }
+                if opcode == 0x67 {
+                    assert!(index >= 2);
+                    assert!(index + 2 < words.len());
+                }
+            }
+        }
     }
 }

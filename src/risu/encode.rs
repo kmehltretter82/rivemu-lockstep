@@ -45,6 +45,38 @@ pub const fn s_type(opcode: u32, funct3: u32, rs1: u8, rs2: u8, imm12: i32) -> u
         | ((u >> 5) << 25)
 }
 
+/// Encodes a standard B-type branch instruction.
+///
+/// `imm13` is the signed byte offset from the branch PC; bit 0 is ignored by
+/// the encoding and callers must supply an aligned offset.
+#[inline]
+pub const fn b_type(opcode: u32, funct3: u32, rs1: u8, rs2: u8, imm13: i32) -> u32 {
+    let u = (imm13 as u32) & 0x1fff;
+    (opcode & 0x7f)
+        | (((u >> 11) & 0x1) << 7)
+        | (((u >> 1) & 0xf) << 8)
+        | ((funct3 & 0x7) << 12)
+        | ((rs1 as u32 & 0x1f) << 15)
+        | ((rs2 as u32 & 0x1f) << 20)
+        | (((u >> 5) & 0x3f) << 25)
+        | (((u >> 12) & 0x1) << 31)
+}
+
+/// Encodes a standard J-type `jal` instruction.
+///
+/// `imm21` is the signed byte offset from the instruction PC; bit 0 is ignored
+/// by the encoding and callers must supply an aligned offset.
+#[inline]
+pub const fn j_type(opcode: u32, rd: u8, imm21: i32) -> u32 {
+    let u = (imm21 as u32) & 0x1f_ffff;
+    (opcode & 0x7f)
+        | ((rd as u32 & 0x1f) << 7)
+        | (((u >> 12) & 0xff) << 12)
+        | (((u >> 11) & 0x1) << 20)
+        | (((u >> 1) & 0x3ff) << 21)
+        | (((u >> 20) & 0x1) << 31)
+}
+
 /// Encodes a standard U-type instruction (`lui`, `auipc`).
 #[inline]
 pub const fn u_type(opcode: u32, rd: u8, imm20: u32) -> u32 {
@@ -86,4 +118,47 @@ pub fn build_trap_handler() -> Vec<u8> {
         bytes.extend_from_slice(&w.to_le_bytes());
     }
     bytes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn decode_b_imm(word: u32) -> i32 {
+        let bits = (((word >> 31) & 1) << 12)
+            | (((word >> 7) & 1) << 11)
+            | (((word >> 25) & 0x3f) << 5)
+            | (((word >> 8) & 0xf) << 1);
+        ((bits << 19) as i32) >> 19
+    }
+
+    fn decode_j_imm(word: u32) -> i32 {
+        let bits = (((word >> 31) & 1) << 20)
+            | (((word >> 12) & 0xff) << 12)
+            | (((word >> 20) & 1) << 11)
+            | (((word >> 21) & 0x3ff) << 1);
+        ((bits << 11) as i32) >> 11
+    }
+
+    #[test]
+    fn branch_encoder_places_positive_and_negative_immediates() {
+        assert_eq!(b_type(0x63, 0, 0, 0, 8), 0x0000_0463);
+        for immediate in [-4096, -4, 2, 8, 4094] {
+            let word = b_type(0x63, 0b111, 5, 6, immediate);
+            assert_eq!(decode_b_imm(word), immediate);
+            assert_eq!((word >> 12) & 7, 0b111);
+            assert_eq!((word >> 15) & 0x1f, 5);
+            assert_eq!((word >> 20) & 0x1f, 6);
+        }
+    }
+
+    #[test]
+    fn jump_encoder_places_positive_and_negative_immediates() {
+        assert_eq!(j_type(0x6f, 1, 8), 0x0080_00ef);
+        for immediate in [-1_048_576, -4, 2, 8, 1_048_574] {
+            let word = j_type(0x6f, 31, immediate);
+            assert_eq!(decode_j_imm(word), immediate);
+            assert_eq!((word >> 7) & 0x1f, 31);
+        }
+    }
 }

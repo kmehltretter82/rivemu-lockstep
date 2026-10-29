@@ -65,7 +65,8 @@ Usage:
 
 RISU Options:
   --reference <sail|qemu>                       Reference model [default: sail]
-  --suite <alu|mul|bitmanip|float|mem|csr|all>   Instruction suite [default: all]
+  --suite <alu|control|mul|bitmanip|float|mem|csr|all>
+                                                 Instruction suite [default: all]
   --blocks <N>                                   Number of random blocks [default: 50]
   --insns <K>                                    Instructions per block [default: 32]
   --seed <HEX_OR_DEC>                            Starting PRNG seed [default: 0x1000]
