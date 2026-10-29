@@ -7,7 +7,9 @@ use rivemu_cpu_riscv::decode;
 use crate::risu::encode::{EBREAK, build_trap_handler};
 use crate::risu::fp_edges;
 use crate::risu::seed::Rng;
-use crate::risu::suite::{Suite, generate_block, generate_compressed_block};
+use crate::risu::suite::{
+    Suite, generate_block, generate_compressed_block, generate_privileged_block,
+};
 use crate::target::{QemuGdbTarget, RivemuTarget};
 use crate::{ArchState, CosimTarget, FieldDiff, StopReason, TargetError};
 
@@ -67,6 +69,9 @@ impl RisuCase {
         if suite == Suite::FpEdges {
             fp_edges::configure_initial_state(&mut init_state);
         }
+        if suite == Suite::Privileged {
+            configure_privileged_initial_state(seed, &mut init_state);
+        }
         let (code_bytes, generated_insns) = if suite == Suite::Compressed {
             let insns = generate_compressed_block(&mut rng, num_insns);
             let mut bytes = Vec::with_capacity(insns.len() * 2 + 4);
@@ -76,7 +81,11 @@ impl RisuCase {
             bytes.extend_from_slice(&EBREAK.to_le_bytes());
             (bytes, insns.len())
         } else {
-            let insns = generate_block(&mut rng, suite, num_insns);
+            let insns = if suite == Suite::Privileged {
+                generate_privileged_block(&mut rng, seed, num_insns)
+            } else {
+                generate_block(&mut rng, suite, num_insns)
+            };
             let generated_insns = insns.len().checked_sub(1).ok_or_else(|| {
                 TargetError::Protocol("generated block is missing its checkpoint".into())
             })?;
@@ -161,6 +170,51 @@ impl RisuCase {
     /// Dynamic instruction limit for this case.
     pub const fn max_steps(&self) -> usize {
         self.max_steps
+    }
+}
+
+fn configure_privileged_initial_state(seed: u64, state: &mut ArchState) {
+    const MSTATUS_MIE: u64 = 1 << 3;
+    const MSTATUS_MPIE: u64 = 1 << 7;
+    const MSTATUS_MPP: u64 = 3 << 11;
+    const MSTATUS_MPRV: u64 = 1 << 17;
+    const MSTATUS_TVM: u64 = 1 << 20;
+    const MSTATUS_TSR: u64 = 1 << 22;
+    const SSTATUS_SIE: u64 = 1 << 1;
+    const SSTATUS_SPIE: u64 = 1 << 5;
+    const SSTATUS_SPP: u64 = 1 << 8;
+
+    match seed & 7 {
+        0 => state.prv = 1, // direct S-mode start
+        1 => state.prv = 0, // direct U-mode start
+        2 => {
+            // Enter S-mode through MRET. Set MPIE and MPRV so the transition
+            // must restore MIE and clear MPRV when dropping below M-mode.
+            state.prv = 3;
+            state.mepc = CODE_BASE + 4;
+            state.mstatus &= !(MSTATUS_MIE | MSTATUS_MPIE | MSTATUS_MPP | MSTATUS_MPRV);
+            state.mstatus |= MSTATUS_MPIE | (1 << 11) | MSTATUS_MPRV;
+        }
+        3 => {
+            // Enter U-mode through SRET. Keep the S-visible status copy
+            // coherent because the Sail endpoint writes mstatus then sstatus.
+            state.prv = 1;
+            state.sepc = CODE_BASE + 4;
+            state.mstatus &= !(SSTATUS_SIE | SSTATUS_SPIE | SSTATUS_SPP | MSTATUS_MPRV);
+            state.mstatus |= SSTATUS_SPIE | MSTATUS_MPRV;
+            state.sstatus &= !(SSTATUS_SIE | SSTATUS_SPIE | SSTATUS_SPP);
+            state.sstatus |= SSTATUS_SPIE;
+        }
+        4 => {
+            state.prv = 1;
+            state.mstatus |= MSTATUS_TVM;
+        }
+        5 => {
+            state.prv = 1;
+            state.mstatus |= MSTATUS_TSR;
+        }
+        6 => state.prv = 1,
+        _ => state.prv = 0, // second direct U-mode case in each eight-seed cycle
     }
 }
 
@@ -347,6 +401,11 @@ impl<C: CosimTarget, R: CosimTarget> RisuHarness<C, R> {
 
     /// Runs an already materialized case identically on candidate and reference.
     pub fn run_case(&mut self, case: &RisuCase) -> Result<Option<BisectReport>, TargetError> {
+        if case.suite == Suite::Privileged && !self.check_csrs {
+            return Err(TargetError::Protocol(
+                "privileged suite requires privileged CSR comparison".into(),
+            ));
+        }
         if !self.step_check
             && (!self.candidate.supports_replay() || !self.reference.supports_replay())
         {
@@ -766,6 +825,27 @@ mod tests {
     }
 
     #[test]
+    fn privileged_cases_alternate_supervisor_and_user_mode() {
+        let supervisor = RisuCase::generate(Suite::Privileged, 0x2000, 8).unwrap();
+        let user = RisuCase::generate(Suite::Privileged, 0x2001, 8).unwrap();
+        let mret = RisuCase::generate(Suite::Privileged, 0x2002, 8).unwrap();
+        let sret = RisuCase::generate(Suite::Privileged, 0x2003, 8).unwrap();
+        let tvm = RisuCase::generate(Suite::Privileged, 0x2004, 8).unwrap();
+        let tsr = RisuCase::generate(Suite::Privileged, 0x2005, 8).unwrap();
+
+        assert_eq!(supervisor.init_state().prv, 1);
+        assert_eq!(user.init_state().prv, 0);
+        assert_eq!(mret.init_state().prv, 3);
+        assert_eq!(mret.init_state().mepc, CODE_BASE + 4);
+        assert_eq!(sret.init_state().prv, 1);
+        assert_eq!(sret.init_state().sepc, CODE_BASE + 4);
+        assert_ne!(tvm.init_state().mstatus & (1 << 20), 0);
+        assert_ne!(tsr.init_state().mstatus & (1 << 22), 0);
+        assert!(!supervisor.uses_scratch());
+        assert!(!user.uses_scratch());
+    }
+
+    #[test]
     fn fetch_and_decode_handles_16_and_32_bit_instructions() {
         let mut target = MockTarget::default();
         target
@@ -794,6 +874,21 @@ mod tests {
 
         let error = harness.run_seed(Suite::IntAlu, 1, 1).unwrap_err();
         assert!(error.to_string().contains("use step-check"));
+    }
+
+    #[test]
+    fn privileged_case_rejects_disabled_csr_comparison() {
+        let mut harness =
+            RisuHarness::from_targets(MockTarget::default(), MockTarget::default(), false).unwrap();
+        harness.set_step_check(true);
+
+        let case = RisuCase::generate(Suite::Privileged, 0x2000, 8).unwrap();
+        let error = harness.run_case(&case).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires privileged CSR comparison")
+        );
     }
 
     #[test]

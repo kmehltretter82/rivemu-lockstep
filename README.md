@@ -53,9 +53,10 @@ Available suites are:
 - `fp-edges` (aliases `fpedges` and `float-edges`): directed static/dynamic rounding, NaN-boxing and signed-zero behavior, fused operations, conversions, and isolated/sticky exception flags. Per-instruction checking is enabled automatically because later cases deliberately overwrite destinations and flags.
 - `mem`: sandboxed loads, stores, atomics, LR/SC, and cache-block zeroing.
 - `csr`: portable CSR values and synchronous trap recovery. Implementation-defined WLRL/WARL values are deliberately excluded from exact comparison.
+- `privileged` (aliases `priv` and `lower-priv`): directed S/U-mode execution, explicit `MRET`/`SRET` transitions, exception entry, machine trap recovery, and privilege-sensitive CSR/system instructions, including `TVM` and `TSR` trap controls. Privileged-state comparison is enabled automatically and requires the patched Sail debug-v1 endpoint. The harness selects a valid no-PMP platform configuration for lower-mode test RAM, matching Rivemu's bare target and the QEMU reference CPU. `TW`/`WFI` is excluded because the permitted wait before trapping is implementation-defined and therefore unsuitable for instruction lockstep.
 - `atomics` (aliases `atomic`, `rv64a`, and `lrsc`): directed RV64A AMO and LR/SC semantics, including ordering-bit encodings, operand aliases, failure paths, and word-result sign extension.
 - `compressed` (aliases `rvc` and `c`): legal sequential RV64C integer operations plus aligned scratch-backed C.LW/C.LD/C.SW/C.SD.
-- `all`: a deterministic mix of the original suites. The dedicated atomic, floating-point edge, and compressed suites are intentionally not included yet.
+- `all`: a deterministic mix of the original suites. The dedicated privileged, atomic, floating-point edge, and compressed suites are intentionally not included yet.
 
 Sail always uses per-instruction comparison, including scratch RAM for memory suites. QEMU defaults to block checkpoints with one-instruction replay on a mismatch; add `--step-check` to catch transient differences that are overwritten before the final checkpoint.
 

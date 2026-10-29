@@ -25,6 +25,8 @@ pub enum Suite {
     SandboxMem,
     /// CSR WARL reads/writes and trap-handler recovery (`mtvec` signature checks).
     CsrTrap,
+    /// Lower-privilege execution, exception entry, and M-mode trap return semantics.
+    Privileged,
     /// Directed RV64A AMO and LR/SC semantics over sandboxed scratch memory.
     Atomics,
     /// Legal, sequential RV64C integer and scratch-memory operations.
@@ -47,6 +49,7 @@ impl Suite {
             "fp-edges" | "fpedges" | "float-edges" => Some(Self::FpEdges),
             "mem" | "amo" | "sandboxmem" => Some(Self::SandboxMem),
             "csr" | "trap" | "csrtrap" => Some(Self::CsrTrap),
+            "priv" | "privileged" | "lower-priv" => Some(Self::Privileged),
             "atomic" | "atomics" | "rv64a" | "lrsc" => Some(Self::Atomics),
             "compressed" | "rvc" | "c" => Some(Self::Compressed),
             "all" => Some(Self::All),
@@ -66,6 +69,7 @@ impl Suite {
             Self::FpEdges => "fp-directed",
             Self::SandboxMem => "sandbox-mem-amo",
             Self::CsrTrap => "csr-trap",
+            Self::Privileged => "privileged-traps",
             Self::Atomics => "rv64a-directed",
             Self::Compressed => "rv64c",
             Self::All => "all",
@@ -84,6 +88,11 @@ pub fn generate_block(rng: &mut Rng, suite: Suite, num_insns: usize) -> Vec<u32>
     };
     let mut fp_edge_selector = if suite == Suite::FpEdges {
         rng.index(fp_edges::CASE_COUNT)
+    } else {
+        0
+    };
+    let mut privileged_selector = if suite == Suite::Privileged {
+        rng.index(PRIVILEGED_CASES)
     } else {
         0
     };
@@ -114,6 +123,10 @@ pub fn generate_block(rng: &mut Rng, suite: Suite, num_insns: usize) -> Vec<u32>
             }
             Suite::SandboxMem => gen_sandbox_mem(rng, &mut out),
             Suite::CsrTrap => gen_csr_trap(rng, &mut out),
+            Suite::Privileged => {
+                out.push(gen_privileged_case(privileged_selector, rng));
+                privileged_selector = (privileged_selector + 1) % PRIVILEGED_CASES;
+            }
             Suite::Atomics => {
                 gen_atomic_case(atomic_selector, atomic_slot, &mut out);
                 atomic_slot += 1;
@@ -124,6 +137,27 @@ pub fn generate_block(rng: &mut Rng, suite: Suite, num_insns: usize) -> Vec<u32>
             }
             Suite::All => unreachable!(),
         }
+    }
+    out.push(EBREAK);
+    out
+}
+
+/// Generates a lower-privilege block, optionally beginning with an explicit
+/// privilege transition or privilege-control trap selected by the low three
+/// bits of `seed`.
+pub fn generate_privileged_block(rng: &mut Rng, seed: u64, num_insns: usize) -> Vec<u32> {
+    let mut out = Vec::with_capacity(num_insns + 1);
+    match seed & 7 {
+        2 => out.push(0x3020_0073), // MRET to S-mode at the following instruction
+        3 => out.push(0x1020_0073), // SRET to U-mode at the following instruction
+        5 => out.push(0x1020_0073), // SRET blocked by mstatus.TSR
+        _ => {}
+    }
+
+    let mut selector = rng.index(PRIVILEGED_CASES);
+    while out.len() < num_insns {
+        out.push(gen_privileged_case(selector, rng));
+        selector = (selector + 1) % PRIVILEGED_CASES;
     }
     out.push(EBREAK);
     out
@@ -760,6 +794,23 @@ fn gen_csr_trap(rng: &mut Rng, out: &mut Vec<u32>) {
     }
 }
 
+const PRIVILEGED_CASES: usize = 8;
+
+fn gen_privileged_case(selector: usize, rng: &mut Rng) -> u32 {
+    debug_assert!(selector < PRIVILEGED_CASES);
+    let rd = rng.pick_gpr();
+    match selector {
+        0 => i_type(0x13, rd, 0b000, rng.pick_src_gpr(), 1), // ordinary lower-mode ADDI
+        1 => 0x0000_0073,                                    // ECALL from S/U mode
+        2 => 0xffff_ffff,                                    // illegal instruction
+        3 => i_type(0x73, rd, 0b010, 0, 0x300),              // CSRRS mstatus (illegal)
+        4 => i_type(0x73, rd, 0b010, 0, 0x100),              // CSRRS sstatus
+        5 => i_type(0x73, rd, 0b010, 0, 0x180),              // CSRRS satp
+        6 => 0x1200_0073,                                    // SFENCE.VMA x0, x0
+        _ => i_type(0x73, 0, 0b001, 0, 0x100),               // CSRW sstatus, x0
+    }
+}
+
 fn gen_csr_alias_set(out: &mut Vec<u32>) {
     out.extend([
         i_type(0x13, 28, 0b000, 0, 0x105),
@@ -929,6 +980,50 @@ mod tests {
         assert_eq!(Suite::parse("fpedges"), Some(Suite::FpEdges));
         assert_eq!(Suite::parse("float-edges"), Some(Suite::FpEdges));
         assert_eq!(Suite::FpEdges.name(), "fp-directed");
+    }
+
+    #[test]
+    fn privileged_suite_names_parse() {
+        assert_eq!(Suite::parse("priv"), Some(Suite::Privileged));
+        assert_eq!(Suite::parse("privileged"), Some(Suite::Privileged));
+        assert_eq!(Suite::parse("lower-priv"), Some(Suite::Privileged));
+        assert_eq!(Suite::Privileged.name(), "privileged-traps");
+    }
+
+    #[test]
+    fn privileged_generator_cycles_through_directed_cases() {
+        let mut rng = Rng::new(0x5052_4956);
+        let words = generate_block(&mut rng, Suite::Privileged, PRIVILEGED_CASES * 2);
+        assert_eq!(words.len(), PRIVILEGED_CASES * 2 + 1);
+        assert_eq!(*words.last().unwrap(), EBREAK);
+
+        let decoded: Vec<_> = words[..words.len() - 1]
+            .iter()
+            .copied()
+            .map(decode::decode)
+            .collect();
+        assert!(decoded.iter().any(|insn| insn.op == Op::Ecall));
+        assert!(decoded.iter().any(|insn| insn.op == Op::Illegal));
+        assert!(decoded.iter().any(|insn| insn.op == Op::SfenceVma));
+        assert!(decoded.iter().filter(|insn| insn.op == Op::Csrrs).count() >= 3);
+        assert!(decoded.iter().any(|insn| insn.op == Op::Csrrw));
+    }
+
+    #[test]
+    fn privileged_transition_blocks_start_with_return_instruction() {
+        let mut mret_rng = Rng::new(2);
+        let mret = generate_privileged_block(&mut mret_rng, 2, 8);
+        assert_eq!(decode::decode(mret[0]).op, Op::Mret);
+        assert_eq!(mret.len(), 9);
+
+        let mut sret_rng = Rng::new(3);
+        let sret = generate_privileged_block(&mut sret_rng, 3, 8);
+        assert_eq!(decode::decode(sret[0]).op, Op::Sret);
+        assert_eq!(sret.len(), 9);
+
+        let mut tsr_rng = Rng::new(5);
+        let tsr = generate_privileged_block(&mut tsr_rng, 5, 8);
+        assert_eq!(decode::decode(tsr[0]).op, Op::Sret);
     }
 
     #[test]

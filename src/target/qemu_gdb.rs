@@ -32,7 +32,7 @@ impl QemuGdbTarget {
                 "-machine",
                 "virt",
                 "-cpu",
-                "rv64,c=true,h=false,sv57=false,zba=true,zbb=true,zbc=true,zbs=true,zicbom=true,zicboz=true,svinval=true,svpbmt=true,sstc=true",
+                "rv64,c=true,h=false,pmp=false,sv57=false,zba=true,zbb=true,zbc=true,zbs=true,zicbom=true,zicboz=true,svinval=true,svpbmt=true,sstc=true",
                 "-m",
                 "128M",
                 "-smp",
@@ -211,7 +211,9 @@ impl CosimTarget for QemuGdbTarget {
     fn set_state(&mut self, state: &ArchState) -> Result<(), TargetError> {
         // Reset control state even when it is not compared. Leaving a CSR from a
         // previous block changes execution and makes seed replay unreliable.
-        self.write_reg(PRIV_GDB_REG, u64::from(state.prv))?;
+        // Restore privileged CSRs from M-mode before installing the requested
+        // final privilege. In particular, S-mode with TVM=1 cannot write satp.
+        self.write_reg(PRIV_GDB_REG, 3)?;
         self.write_csr(csr::MSTATUS, state.mstatus)?;
         self.write_csr(csr::MEPC, state.mepc)?;
         self.write_csr(csr::MCAUSE, state.mcause)?;
@@ -241,6 +243,7 @@ impl CosimTarget for QemuGdbTarget {
             self.write_reg(33 + i as u32, state.f[i])?;
         }
         self.write_csr(csr::FCSR, u64::from(state.fcsr & 0xff))?;
+        self.write_reg(PRIV_GDB_REG, u64::from(state.prv))?;
         Ok(())
     }
 
@@ -275,7 +278,26 @@ impl CosimTarget for QemuGdbTarget {
                 let sepc = self.read_csr(csr::SEPC)?;
                 let scause = self.read_csr(csr::SCAUSE)?;
                 let stval = self.read_csr(csr::STVAL)?;
-                let satp = self.read_csr(csr::SATP)?;
+                let satp = if prv == 1 && mstatus & (1 << 20) != 0 {
+                    // QEMU applies mstatus.TVM to debugger satp reads. Elevate
+                    // only for this otherwise-unreadable sample; changing mode
+                    // also clears QEMU's hidden LR/SC reservation state.
+                    self.write_reg(PRIV_GDB_REG, 3)?;
+                    let value = self.read_csr(csr::SATP);
+                    let restore = self.write_reg(PRIV_GDB_REG, u64::from(prv));
+                    match value {
+                        Ok(value) => {
+                            restore?;
+                            value
+                        }
+                        Err(error) => {
+                            let _ = restore;
+                            return Err(error);
+                        }
+                    }
+                } else {
+                    self.read_csr(csr::SATP)?
+                };
                 (
                     prv, mstatus, mepc, mcause, mtval, sstatus, sepc, scause, stval, satp,
                 )
@@ -350,6 +372,24 @@ fn encode_le_hex_u64(val: u64) -> String {
 }
 
 fn decode_le_hex_u64(hex: &str) -> Result<u64, TargetError> {
+    if hex.is_empty() {
+        return Err(TargetError::Protocol(
+            "QEMU GDB returned an empty register value".into(),
+        ));
+    }
+    if hex.len() == 3
+        && hex.starts_with('E')
+        && hex[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(TargetError::Protocol(format!(
+            "QEMU GDB returned error '{hex}'"
+        )));
+    }
+    if hex.len() % 2 != 0 {
+        return Err(TargetError::Protocol(format!(
+            "odd-length register value '{hex}'"
+        )));
+    }
     if hex.len() > 16 {
         return Err(TargetError::Protocol(format!(
             "hex value too long: '{hex}'"
@@ -362,4 +402,25 @@ fn decode_le_hex_u64(hex: &str) -> Result<u64, TargetError> {
             .map_err(|e| TargetError::Protocol(e.to_string()))?;
     }
     Ok(u64::from_le_bytes(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn register_decoder_rejects_rsp_errors_and_odd_lengths() {
+        assert!(decode_le_hex_u64("").is_err());
+        assert!(decode_le_hex_u64("E14").is_err());
+        assert!(decode_le_hex_u64("123").is_err());
+        assert_eq!(decode_le_hex_u64("EF00000000000000").unwrap(), 0xef);
+    }
+
+    #[test]
+    fn register_decoder_accepts_little_endian_values() {
+        assert_eq!(
+            decode_le_hex_u64("efcdab8967452301").unwrap(),
+            0x0123_4567_89ab_cdef
+        );
+    }
 }

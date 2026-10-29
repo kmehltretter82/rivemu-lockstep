@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::risu::RisuCase;
+use crate::risu::Suite;
 use crate::risu::encode::build_trap_handler;
 use crate::risu::harness::{CODE_BASE, SCRATCH_BASE, TRAP_BASE};
 use crate::target::sail_elf::{SailElfLayout, build_sail_elf};
@@ -137,7 +138,24 @@ impl SailGdbTarget {
         let bootstrap_insns = u32::try_from(bootstrap_code.len() / 4)
             .expect("Sail bootstrap instruction count fits u32");
         let bootstrap = SailBootstrap::new(SAIL_BOOTSTRAP_BASE, bootstrap_insns, TRAP_BASE);
-        match Self::spawn(sail_bin, &elf_path, bootstrap) {
+        let spawn_result = if case.suite() == Suite::Privileged {
+            // Model an implementation with no PMP entries so direct S/U-mode
+            // execution can reach the test RAM. Rivemu's bare lockstep target
+            // uses the corresponding non-strict PMP policy.
+            const NO_PMP_CONFIG: &str = concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/configs/sail-lower-priv-no-pmp.json"
+            );
+            Self::spawn_with_args(
+                sail_bin,
+                &elf_path,
+                &["--config-override", NO_PMP_CONFIG],
+                bootstrap,
+            )
+        } else {
+            Self::spawn(sail_bin, &elf_path, bootstrap)
+        };
+        match spawn_result {
             Ok(mut target) => {
                 target.owned_elf = Some(elf_path);
                 Ok(target)
@@ -466,15 +484,9 @@ impl CosimTarget for SailGdbTarget {
     }
 
     fn set_state(&mut self, state: &ArchState) -> Result<(), TargetError> {
-        if state.prv != 3 {
-            return Err(TargetError::Protocol(format!(
-                "Sail GDB cannot seed privilege mode {}; only M-mode is supported",
-                state.prv
-            )));
-        }
+        validate_seed_privilege(self.debug_v1, state.prv)?;
 
         if self.debug_v1 {
-            self.write_privilege(state.prv)?;
             self.write_reg(MSTATUS_GDB_REG, state.mstatus)?;
             self.write_reg(MEPC_GDB_REG, state.mepc)?;
             self.write_reg(MCAUSE_GDB_REG, state.mcause)?;
@@ -521,6 +533,7 @@ impl CosimTarget for SailGdbTarget {
         self.write_fcsr(state.fcsr & 0xff)?;
         if self.debug_v1 {
             self.write_reg(PC_GDB_REG, state.pc)?;
+            self.write_privilege(state.prv)?;
         }
         Ok(())
     }
@@ -591,6 +604,20 @@ impl CosimTarget for SailGdbTarget {
             Ok(StopReason::LimitReached)
         }
     }
+}
+
+fn validate_seed_privilege(debug_v1: bool, privilege: u8) -> Result<(), TargetError> {
+    if !matches!(privilege, 0 | 1 | 3) {
+        return Err(TargetError::Protocol(format!(
+            "invalid RISC-V privilege mode {privilege}"
+        )));
+    }
+    if privilege != 3 && !debug_v1 {
+        return Err(TargetError::Protocol(format!(
+            "stock Sail GDB cannot seed privilege mode {privilege}; only M-mode is supported"
+        )));
+    }
+    Ok(())
 }
 
 impl Drop for SailGdbTarget {
@@ -849,6 +876,21 @@ mod tests {
             memory_chunk_from_supported("qXfer:features:read+"),
             DEFAULT_MEMORY_CHUNK
         );
+    }
+
+    #[test]
+    fn debug_v1_accepts_all_architectural_privilege_modes() {
+        for privilege in [0, 1, 3] {
+            validate_seed_privilege(true, privilege).unwrap();
+        }
+        assert!(validate_seed_privilege(true, 2).is_err());
+    }
+
+    #[test]
+    fn stock_endpoint_rejects_non_machine_privilege() {
+        validate_seed_privilege(false, 3).unwrap();
+        assert!(validate_seed_privilege(false, 0).is_err());
+        assert!(validate_seed_privilege(false, 1).is_err());
     }
 
     #[test]

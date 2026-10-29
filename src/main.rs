@@ -65,7 +65,7 @@ Usage:
 
 RISU Options:
   --reference <sail|qemu>                       Reference model [default: sail]
-  --suite <alu|control|fence-i|mul|bitmanip|float|fp-edges|mem|csr|atomics|compressed|all>
+  --suite <alu|control|fence-i|mul|bitmanip|float|fp-edges|mem|csr|privileged|atomics|compressed|all>
                                                  Instruction suite [default: all]
   --blocks <N>                                   Number of random blocks [default: 50]
   --insns <K>                                    Instructions per block [default: 32]
@@ -255,8 +255,10 @@ fn main() -> ExitCode {
         }
     } else {
         let t0 = Instant::now();
-        let effective_step_check =
-            step_check || reference == RisuReference::Sail || suite == Suite::FpEdges;
+        let effective_check_csrs = check_csrs || suite == Suite::Privileged;
+        let effective_step_check = step_check
+            || reference == RisuReference::Sail
+            || matches!(suite, Suite::FpEdges | Suite::Privileged);
         match reference {
             RisuReference::Qemu => {
                 let rivemu = match RivemuTarget::new_bare(strict) {
@@ -273,7 +275,7 @@ fn main() -> ExitCode {
                         return ExitCode::from(2);
                     }
                 };
-                let mut harness = match RisuHarness::new(rivemu, qemu, check_csrs) {
+                let mut harness = match RisuHarness::new(rivemu, qemu, effective_check_csrs) {
                     Ok(harness) => harness,
                     Err(error) => {
                         eprintln!("error setting up RISU harness: {error}");
@@ -325,13 +327,14 @@ fn main() -> ExitCode {
                             return ExitCode::from(2);
                         }
                     };
-                    let mut harness = match RisuHarness::from_targets(rivemu, sail, check_csrs) {
-                        Ok(harness) => harness,
-                        Err(error) => {
-                            eprintln!("error setting up RISU harness: {error}");
-                            return ExitCode::from(2);
-                        }
-                    };
+                    let mut harness =
+                        match RisuHarness::from_targets(rivemu, sail, effective_check_csrs) {
+                            Ok(harness) => harness,
+                            Err(error) => {
+                                eprintln!("error setting up RISU harness: {error}");
+                                return ExitCode::from(2);
+                            }
+                        };
                     harness.set_step_check(true);
                     match harness.run_case(&case) {
                         Ok(None) => {}

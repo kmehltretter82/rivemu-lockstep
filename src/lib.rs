@@ -79,7 +79,8 @@ impl Default for ArchState {
 }
 
 /// Mask of `mstatus` bits compared in lockstep (excludes `SD` bit 63 if FS state encoding differs,
-/// or compares architectural bits `SIE`, `MIE`, `SPIE`, `MPIE`, `SPP`, `MPP`, `SUM`, `MXR`, `TVM`, `TW`, `TSR`).
+/// or compares architectural bits `SIE`, `MIE`, `SPIE`, `MPIE`, `SPP`, `MPP`, `MPRV`, `SUM`,
+/// `MXR`, `TVM`, `TW`, `TSR`).
 pub const MSTATUS_COMPARE_MASK: u64 = 0x0000_0000_007e_19aa;
 
 impl ArchState {
