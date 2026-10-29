@@ -52,6 +52,10 @@ pub struct ArchState {
     pub scause: u64,
     /// Supervisor trap value (`stval`).
     pub stval: u64,
+    /// Supervisor trap-vector base and mode (`stvec`).
+    pub stvec: u64,
+    /// Machine exception-delegation mask (`medeleg`).
+    pub medeleg: u64,
     /// Supervisor address translation and protection (`satp`).
     pub satp: u64,
 }
@@ -73,6 +77,8 @@ impl Default for ArchState {
             sepc: 0,
             scause: 0,
             stval: 0,
+            stvec: 0,
+            medeleg: 0,
             satp: 0,
         }
     }
@@ -144,6 +150,8 @@ impl ArchState {
                 ("mcause", self.mcause, other.mcause),
                 ("sepc", self.sepc, other.sepc),
                 ("scause", self.scause, other.scause),
+                ("stvec", self.stvec, other.stvec),
+                ("medeleg", self.medeleg, other.medeleg),
                 ("satp", self.satp, other.satp),
             ] {
                 if rv != qv {
@@ -156,6 +164,27 @@ impl ArchState {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delegation_csrs_are_compared_only_with_privileged_checks() {
+        let candidate = ArchState::default();
+        let mut reference = candidate.clone();
+        reference.stvec = 0x8000_2100;
+        reference.medeleg = (1 << 2) | (1 << 8) | (1 << 9);
+
+        assert!(candidate.diff(&reference, false).is_empty());
+        let names = candidate
+            .diff(&reference, true)
+            .into_iter()
+            .map(|difference| difference.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["stvec", "medeleg"]);
     }
 }
 

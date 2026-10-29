@@ -497,10 +497,10 @@ impl CosimTarget for SailGdbTarget {
             self.write_reg(STVAL_GDB_REG, state.stval)?;
             self.write_reg(SATP_GDB_REG, state.satp)?;
             self.write_reg(MTVEC_GDB_REG, self.bootstrap.trap_vector)?;
-            self.write_reg(STVEC_GDB_REG, 0)?;
+            self.write_reg(STVEC_GDB_REG, state.stvec)?;
             self.write_reg(MSCRATCH_GDB_REG, 0)?;
             self.write_reg(SSCRATCH_GDB_REG, 0)?;
-            self.write_reg(MEDELEG_GDB_REG, 0)?;
+            self.write_reg(MEDELEG_GDB_REG, state.medeleg)?;
             self.write_reg(MIDELEG_GDB_REG, 0)?;
             self.write_reg(SENVCFG_GDB_REG, 0)?;
         } else {
@@ -564,6 +564,8 @@ impl CosimTarget for SailGdbTarget {
             sepc: 0,
             scause: 0,
             stval: 0,
+            stvec: 0,
+            medeleg: 0,
             satp: 0,
         };
         if self.debug_v1 {
@@ -576,6 +578,8 @@ impl CosimTarget for SailGdbTarget {
             state.sepc = self.read_reg(SEPC_GDB_REG)?;
             state.scause = self.read_reg(SCAUSE_GDB_REG)?;
             state.stval = self.read_reg(STVAL_GDB_REG)?;
+            state.stvec = self.read_reg(STVEC_GDB_REG)?;
+            state.medeleg = self.read_reg(MEDELEG_GDB_REG)?;
             state.satp = self.read_reg(SATP_GDB_REG)?;
         }
         Ok(state)

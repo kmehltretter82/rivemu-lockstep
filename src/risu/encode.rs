@@ -88,30 +88,40 @@ pub const EBREAK: u32 = 0x0010_0073;
 /// `nop` instruction (`addi x0, x0, 0`).
 pub const NOP: u32 = 0x0000_0013;
 
-/// Builds a deterministic M-mode trap handler (for `mtvec = 0x8000_2000`) that:
+/// Builds a deterministic M-mode trap handler that:
 /// 1. Mixes `mcause` and `mepc` into signature register `s11` (`x27`) using `t1` (`x6`).
 /// 2. Advances `mepc` by `+4` (all generated trapping instructions are 32-bit) and executes `mret`.
 ///
 /// `mtval` is deliberately excluded: for an illegal-instruction exception, a
 /// conforming implementation may report either zero or instruction bits.
 pub fn build_trap_handler() -> Vec<u8> {
+    build_recovery_handler(0x342, 0x341, 0x3020_0073)
+}
+
+/// Builds the corresponding S-mode recovery handler using `scause`, `sepc`,
+/// and `sret`. It is installed at the privileged suite's `stvec` address.
+pub fn build_supervisor_trap_handler() -> Vec<u8> {
+    build_recovery_handler(0x142, 0x141, 0x1020_0073)
+}
+
+fn build_recovery_handler(cause_csr: i32, epc_csr: i32, return_insn: u32) -> Vec<u8> {
     let insns: &[u32] = &[
-        // csrr t1, mcause (0x342)
-        i_type(0x73, 6, 0b010, 0, 0x342),
+        // csrr t1, {m,s}cause
+        i_type(0x73, 6, 0b010, 0, cause_csr),
         // slli s11, s11, 7
         i_type(0x13, 27, 0b001, 27, 7),
         // xor s11, s11, t1
         r_type(0x33, 27, 0b100, 27, 6, 0x00),
-        // csrr t1, mepc (0x341)
-        i_type(0x73, 6, 0b010, 0, 0x341),
+        // csrr t1, {m,s}epc
+        i_type(0x73, 6, 0b010, 0, epc_csr),
         // xor s11, s11, t1
         r_type(0x33, 27, 0b100, 27, 6, 0x00),
         // addi t1, t1, 4 (all generated trap-suite instructions are 32-bit)
         i_type(0x13, 6, 0b000, 6, 4),
-        // csrw mepc, t1
-        i_type(0x73, 0, 0b001, 6, 0x341),
-        // mret (0x3020_0073)
-        0x3020_0073,
+        // csrw {m,s}epc, t1
+        i_type(0x73, 0, 0b001, 6, epc_csr),
+        // mret or sret
+        return_insn,
     ];
     let mut bytes = Vec::with_capacity(insns.len() * 4);
     for &w in insns {
@@ -160,5 +170,29 @@ mod tests {
             assert_eq!(decode_j_imm(word), immediate);
             assert_eq!((word >> 7) & 0x1f, 31);
         }
+    }
+
+    #[test]
+    fn recovery_handlers_use_the_matching_privilege_csrs_and_return() {
+        let words = |bytes: Vec<u8>| {
+            bytes
+                .chunks_exact(4)
+                .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+                .collect::<Vec<_>>()
+        };
+
+        let machine = words(build_trap_handler());
+        assert_eq!(machine.len(), 8);
+        assert_eq!((machine[0] >> 20) & 0xfff, 0x342);
+        assert_eq!((machine[3] >> 20) & 0xfff, 0x341);
+        assert_eq!((machine[6] >> 20) & 0xfff, 0x341);
+        assert_eq!(machine[7], 0x3020_0073);
+
+        let supervisor = words(build_supervisor_trap_handler());
+        assert_eq!(supervisor.len(), 8);
+        assert_eq!((supervisor[0] >> 20) & 0xfff, 0x142);
+        assert_eq!((supervisor[3] >> 20) & 0xfff, 0x141);
+        assert_eq!((supervisor[6] >> 20) & 0xfff, 0x141);
+        assert_eq!(supervisor[7], 0x1020_0073);
     }
 }

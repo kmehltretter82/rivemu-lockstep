@@ -224,9 +224,9 @@ impl CosimTarget for QemuGdbTarget {
         self.write_csr(csr::SATP, state.satp)?;
         self.write_csr(csr::MSCRATCH, 0)?;
         self.write_csr(csr::SSCRATCH, 0)?;
-        self.write_csr(csr::MEDELEG, 0)?;
+        self.write_csr(csr::MEDELEG, state.medeleg)?;
         self.write_csr(csr::MIDELEG, 0)?;
-        self.write_csr(csr::STVEC, 0)?;
+        self.write_csr(csr::STVEC, state.stvec)?;
         self.write_csr(csr::SENVCFG, 0)?;
         let mut g_pkt = String::with_capacity(1 + 33 * 16);
         g_pkt.push('G');
@@ -267,7 +267,7 @@ impl CosimTarget for QemuGdbTarget {
         }
         let fcsr = (self.read_csr(csr::FCSR)? & 0xff) as u32;
 
-        let (prv, mstatus, mepc, mcause, mtval, sstatus, sepc, scause, stval, satp) =
+        let (prv, mstatus, mepc, mcause, mtval, sstatus, sepc, scause, stval, stvec, medeleg, satp) =
             if self.sync_csrs {
                 let prv = (self.read_reg(PRIV_GDB_REG)? & 3) as u8;
                 let mstatus = self.read_csr(csr::MSTATUS)?;
@@ -278,6 +278,8 @@ impl CosimTarget for QemuGdbTarget {
                 let sepc = self.read_csr(csr::SEPC)?;
                 let scause = self.read_csr(csr::SCAUSE)?;
                 let stval = self.read_csr(csr::STVAL)?;
+                let stvec = self.read_csr(csr::STVEC)?;
+                let medeleg = self.read_csr(csr::MEDELEG)?;
                 let satp = if prv == 1 && mstatus & (1 << 20) != 0 {
                     // QEMU applies mstatus.TVM to debugger satp reads. Elevate
                     // only for this otherwise-unreadable sample; changing mode
@@ -299,10 +301,11 @@ impl CosimTarget for QemuGdbTarget {
                     self.read_csr(csr::SATP)?
                 };
                 (
-                    prv, mstatus, mepc, mcause, mtval, sstatus, sepc, scause, stval, satp,
+                    prv, mstatus, mepc, mcause, mtval, sstatus, sepc, scause, stval, stvec,
+                    medeleg, satp,
                 )
             } else {
-                (3, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+                (3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
             };
 
         Ok(ArchState {
@@ -319,6 +322,8 @@ impl CosimTarget for QemuGdbTarget {
             sepc,
             scause,
             stval,
+            stvec,
+            medeleg,
             satp,
         })
     }

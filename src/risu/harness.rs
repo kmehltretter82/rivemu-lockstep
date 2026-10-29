@@ -4,7 +4,7 @@ use std::fmt;
 
 use rivemu_cpu_riscv::decode;
 
-use crate::risu::encode::{EBREAK, build_trap_handler};
+use crate::risu::encode::{EBREAK, build_supervisor_trap_handler, build_trap_handler};
 use crate::risu::fp_edges;
 use crate::risu::seed::Rng;
 use crate::risu::suite::{
@@ -17,6 +17,8 @@ use crate::{ArchState, CosimTarget, FieldDiff, StopReason, TargetError};
 pub const CODE_BASE: u64 = 0x8000_0000;
 /// Guest physical address of the M-mode trap recovery handler (`mtvec`).
 pub const TRAP_BASE: u64 = 0x8000_2000;
+/// Guest physical address of the S-mode trap recovery handler (`stvec`).
+pub const S_TRAP_BASE: u64 = TRAP_BASE + 0x100;
 /// Guest physical address of the sandboxed 4 KiB scratch RAM buffer (`s0`).
 pub const SCRATCH_BASE: u64 = 0x8001_0000;
 /// Size of the seeded scratch buffer, including the end of unaligned accesses.
@@ -184,7 +186,8 @@ fn configure_privileged_initial_state(seed: u64, state: &mut ArchState) {
     const SSTATUS_SPIE: u64 = 1 << 5;
     const SSTATUS_SPP: u64 = 1 << 8;
 
-    match seed & 7 {
+    let mode = seed & 7;
+    match mode {
         0 => state.prv = 1, // direct S-mode start
         1 => state.prv = 0, // direct U-mode start
         2 => {
@@ -215,6 +218,18 @@ fn configure_privileged_initial_state(seed: u64, state: &mut ArchState) {
         }
         6 => state.prv = 1,
         _ => state.prv = 0, // second direct U-mode case in each eight-seed cycle
+    }
+
+    // Seeds 8..15 repeat the mode/transition matrix with synchronous
+    // exception delegation. The TSR case must remain M-handled: its S-mode
+    // recovery handler could not execute SRET without recursively trapping.
+    if seed & 8 != 0 && mode != 5 {
+        const ILLEGAL_INSTRUCTION: u64 = 1 << 2;
+        const USER_ECALL: u64 = 1 << 8;
+        const SUPERVISOR_ECALL: u64 = 1 << 9;
+
+        state.stvec = S_TRAP_BASE;
+        state.medeleg = ILLEGAL_INSTRUCTION | USER_ECALL | SUPERVISOR_ECALL;
     }
 }
 
@@ -339,7 +354,7 @@ pub struct RisuHarness<C = RivemuTarget, R = QemuGdbTarget> {
 }
 
 impl RisuHarness {
-    /// Creates a new `RISU` lockstep harness and installs the trap handler at [`TRAP_BASE`].
+    /// Creates a new `RISU` lockstep harness and installs the trap handlers.
     pub fn new(
         candidate: RivemuTarget,
         mut reference: QemuGdbTarget,
@@ -351,7 +366,7 @@ impl RisuHarness {
 }
 
 impl<C: CosimTarget, R: CosimTarget> RisuHarness<C, R> {
-    /// Creates a harness from any candidate/reference pair and installs the trap handler.
+    /// Creates a harness from any candidate/reference pair and installs the trap handlers.
     pub fn from_targets(
         mut candidate: C,
         mut reference: R,
@@ -370,8 +385,11 @@ impl<C: CosimTarget, R: CosimTarget> RisuHarness<C, R> {
             )));
         }
         let handler = build_trap_handler();
+        let supervisor_handler = build_supervisor_trap_handler();
         candidate.load_ram(TRAP_BASE, &handler)?;
         reference.load_ram(TRAP_BASE, &handler)?;
+        candidate.load_ram(S_TRAP_BASE, &supervisor_handler)?;
+        reference.load_ram(S_TRAP_BASE, &supervisor_handler)?;
         candidate.set_trap_vector(TRAP_BASE)?;
         reference.set_trap_vector(TRAP_BASE)?;
         Ok(Self {
@@ -779,6 +797,26 @@ mod tests {
     }
 
     #[test]
+    fn harness_installs_distinct_machine_and_supervisor_handlers() {
+        let mut harness =
+            RisuHarness::from_targets(MockTarget::default(), MockTarget::default(), false).unwrap();
+        let machine = build_trap_handler();
+        let supervisor = build_supervisor_trap_handler();
+        let mut actual = vec![0; machine.len()];
+
+        assert!(TRAP_BASE + machine.len() as u64 <= S_TRAP_BASE);
+        assert!(S_TRAP_BASE + supervisor.len() as u64 <= SCRATCH_BASE);
+        harness.candidate.read_ram(TRAP_BASE, &mut actual).unwrap();
+        assert_eq!(actual, machine);
+        actual.resize(supervisor.len(), 0);
+        harness
+            .candidate
+            .read_ram(S_TRAP_BASE, &mut actual)
+            .unwrap();
+        assert_eq!(actual, supervisor);
+    }
+
+    #[test]
     fn generated_cases_are_exactly_reproducible() {
         let first = RisuCase::generate(Suite::All, 0x1234, 32).unwrap();
         let second = RisuCase::generate(Suite::All, 0x1234, 32).unwrap();
@@ -825,7 +863,7 @@ mod tests {
     }
 
     #[test]
-    fn privileged_cases_alternate_supervisor_and_user_mode() {
+    fn privileged_cases_cover_transitions_controls_and_delegation() {
         let supervisor = RisuCase::generate(Suite::Privileged, 0x2000, 8).unwrap();
         let user = RisuCase::generate(Suite::Privileged, 0x2001, 8).unwrap();
         let mret = RisuCase::generate(Suite::Privileged, 0x2002, 8).unwrap();
@@ -841,6 +879,18 @@ mod tests {
         assert_eq!(sret.init_state().sepc, CODE_BASE + 4);
         assert_ne!(tvm.init_state().mstatus & (1 << 20), 0);
         assert_ne!(tsr.init_state().mstatus & (1 << 22), 0);
+        for seed in 8..16 {
+            let case = RisuCase::generate(Suite::Privileged, 0x2000 + seed, 8).unwrap();
+            if seed == 13 {
+                // With TSR set, the S-mode handler's final SRET would itself
+                // trap and recurse forever, so this seed deliberately stays in M.
+                assert_eq!(case.init_state().stvec, 0);
+                assert_eq!(case.init_state().medeleg, 0);
+            } else {
+                assert_eq!(case.init_state().stvec, S_TRAP_BASE);
+                assert_eq!(case.init_state().medeleg, (1 << 2) | (1 << 8) | (1 << 9));
+            }
+        }
         assert!(!supervisor.uses_scratch());
         assert!(!user.uses_scratch());
     }

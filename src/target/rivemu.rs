@@ -93,9 +93,9 @@ impl CosimTarget for RivemuTarget {
         h.csr.satp = state.satp;
         h.csr.mscratch = 0;
         h.csr.sscratch = 0;
-        h.csr.medeleg = 0;
+        h.csr.medeleg = state.medeleg;
         h.csr.mideleg = 0;
-        h.csr.stvec = 0;
+        h.csr.stvec = state.stvec;
         h.csr.senvcfg = 0;
         h.wfi = false;
         h.invalidate_icache();
@@ -120,6 +120,8 @@ impl CosimTarget for RivemuTarget {
             sepc: h.csr.sepc,
             scause: h.csr.scause,
             stval: h.csr.stval,
+            stvec: h.csr.stvec,
+            medeleg: h.csr.medeleg,
             satp: h.csr.satp,
         })
     }
@@ -148,6 +150,53 @@ impl CosimTarget for RivemuTarget {
             Ok(StopReason::Breakpoint)
         } else {
             Ok(StopReason::LimitReached)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::risu::encode::build_supervisor_trap_handler;
+    use crate::risu::harness::{CODE_BASE, S_TRAP_BASE};
+
+    use super::*;
+
+    #[test]
+    fn delegated_ecall_enters_and_returns_through_supervisor_handler() {
+        const ECALL: u32 = 0x0000_0073;
+        const MSTATUS_SPP: u64 = 1 << 8;
+
+        let mut target = RivemuTarget::new_bare(false).unwrap();
+        target.load_ram(CODE_BASE, &ECALL.to_le_bytes()).unwrap();
+        target
+            .load_ram(S_TRAP_BASE, &build_supervisor_trap_handler())
+            .unwrap();
+
+        for (origin, cause) in [(1, 9u64), (0, 8u64)] {
+            let initial = ArchState {
+                pc: CODE_BASE,
+                prv: origin,
+                stvec: S_TRAP_BASE,
+                medeleg: 1 << cause,
+                ..ArchState::default()
+            };
+            target.set_state(&initial).unwrap();
+
+            target.step_one().unwrap();
+            let trapped = target.get_state().unwrap();
+            assert_eq!(trapped.pc, S_TRAP_BASE);
+            assert_eq!(trapped.prv, 1);
+            assert_eq!(trapped.scause, cause);
+            assert_eq!(trapped.sepc, CODE_BASE);
+            assert_eq!(trapped.mstatus & MSTATUS_SPP != 0, origin == 1);
+
+            for _ in 0..8 {
+                target.step_one().unwrap();
+            }
+            let returned = target.get_state().unwrap();
+            assert_eq!(returned.pc, CODE_BASE + 4);
+            assert_eq!(returned.prv, origin);
+            assert_eq!(returned.sepc, CODE_BASE + 4);
         }
     }
 }
