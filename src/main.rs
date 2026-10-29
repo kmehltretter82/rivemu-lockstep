@@ -65,7 +65,7 @@ Usage:
 
 RISU Options:
   --reference <sail|qemu>                       Reference model [default: sail]
-  --suite <alu|control|fence-i|mul|bitmanip|float|mem|csr|all>
+  --suite <alu|control|fence-i|mul|bitmanip|float|mem|csr|compressed|all>
                                                  Instruction suite [default: all]
   --blocks <N>                                   Number of random blocks [default: 50]
   --insns <K>                                    Instructions per block [default: 32]

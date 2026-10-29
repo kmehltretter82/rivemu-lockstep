@@ -151,6 +151,7 @@ pub fn run_firmware_lockstep(
                 step_index,
                 pc,
                 insn_word,
+                insn_len: 4,
                 decoded,
                 pre_state,
                 candidate_name: rivemu.name(),

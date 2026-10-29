@@ -22,7 +22,9 @@ pub enum Suite {
     SandboxMem,
     /// CSR WARL reads/writes and trap-handler recovery (`mtvec` signature checks).
     CsrTrap,
-    /// Combined mix of all suites above.
+    /// Legal, sequential RV64C integer and scratch-memory operations.
+    Compressed,
+    /// Combined mix of the original 32-bit suites (excluding [`Self::Compressed`]).
     All,
 }
 
@@ -38,6 +40,7 @@ impl Suite {
             "float" | "fp" | "fd" => Some(Self::Float),
             "mem" | "amo" | "sandboxmem" => Some(Self::SandboxMem),
             "csr" | "trap" | "csrtrap" => Some(Self::CsrTrap),
+            "compressed" | "rvc" | "c" => Some(Self::Compressed),
             "all" => Some(Self::All),
             _ => None,
         }
@@ -54,6 +57,7 @@ impl Suite {
             Self::Float => "float-fd",
             Self::SandboxMem => "sandbox-mem-amo",
             Self::CsrTrap => "csr-trap",
+            Self::Compressed => "rv64c",
             Self::All => "all",
         }
     }
@@ -85,11 +89,147 @@ pub fn generate_block(rng: &mut Rng, suite: Suite, num_insns: usize) -> Vec<u32>
             Suite::Float => out.push(gen_float(rng)),
             Suite::SandboxMem => gen_sandbox_mem(rng, &mut out),
             Suite::CsrTrap => gen_csr_trap(rng, &mut out),
+            Suite::Compressed => {
+                unreachable!("compressed instructions use generate_compressed_block")
+            }
             Suite::All => unreachable!(),
         }
     }
     out.push(EBREAK);
     out
+}
+
+/// Generates exactly `num_insns` legal, sequential RV64C instructions.
+///
+/// Unlike [`generate_block`], this does not append the 32-bit `EBREAK`
+/// checkpoint because its return type deliberately contains only 16-bit
+/// instructions. The case materializer appends that checkpoint after byte
+/// serialization.
+pub fn generate_compressed_block(rng: &mut Rng, num_insns: usize) -> Vec<u16> {
+    let mut out = Vec::with_capacity(num_insns);
+    while out.len() < num_insns {
+        let insn = match rng.next_u64() % 24 {
+            // Give C.ADDI and its architecturally defined hints extra weight.
+            0 => encode_ci(0b000, 0, 0),                 // C.NOP
+            1 => encode_ci(0b000, 0, nonzero_imm6(rng)), // C.ADDI hint
+            2..=4 => encode_ci(0b000, compressed_rd(rng), random_imm6(rng)),
+            5 => encode_ci(0b001, compressed_rd(rng), random_imm6(rng)), // C.ADDIW
+            6 => encode_ci(0b010, compressed_rd(rng), random_imm6(rng)), // C.LI
+            7 => {
+                let mut rd = compressed_rd(rng);
+                while rd == 2 {
+                    rd = compressed_rd(rng);
+                }
+                encode_ci(0b011, rd, nonzero_imm6(rng)) // C.LUI
+            }
+            8 => encode_cb_imm(0b00, compact_dest(rng), random_imm6(rng)), // C.SRLI
+            9 => encode_cb_imm(0b01, compact_dest(rng), random_imm6(rng)), // C.SRAI
+            10 => encode_cb_imm(0b10, compact_dest(rng), random_imm6(rng)), // C.ANDI
+            11 => encode_ca(0, 0b00, compact_dest(rng), compact_src(rng)), // C.SUB
+            12 => encode_ca(0, 0b01, compact_dest(rng), compact_src(rng)), // C.XOR
+            13 => encode_ca(0, 0b10, compact_dest(rng), compact_src(rng)), // C.OR
+            14 => encode_ca(0, 0b11, compact_dest(rng), compact_src(rng)), // C.AND
+            15 => encode_ca(1, 0b00, compact_dest(rng), compact_src(rng)), // C.SUBW
+            16 => encode_ca(1, 0b01, compact_dest(rng), compact_src(rng)), // C.ADDW
+            17 => encode_ci_shift(compressed_rd(rng), random_imm6(rng)),   // C.SLLI
+            18 => encode_cr(0, compressed_rd(rng), nonzero_reg(rng)),      // C.MV
+            19 => encode_cr(1, compressed_rd(rng), nonzero_reg(rng)),      // C.ADD
+            20 => encode_compact_mem(0b010, compact_dest(rng), word_offset(rng)), // C.LW
+            21 => encode_compact_mem(0b011, compact_dest(rng), double_offset(rng)), // C.LD
+            22 => encode_compact_mem(0b110, compact_dest(rng), word_offset(rng)), // C.SW
+            _ => encode_compact_mem(0b111, compact_dest(rng), double_offset(rng)), // C.SD
+        };
+        out.push(insn);
+    }
+    out
+}
+
+fn random_imm6(rng: &mut Rng) -> u8 {
+    (rng.next_u64() & 0x3f) as u8
+}
+
+fn nonzero_imm6(rng: &mut Rng) -> u8 {
+    let imm = random_imm6(rng);
+    if imm == 0 { 1 } else { imm }
+}
+
+fn compressed_rd(rng: &mut Rng) -> u8 {
+    // `pick_gpr` excludes x8, which must retain SCRATCH_BASE throughout the block.
+    rng.pick_gpr()
+}
+
+fn compact_dest(rng: &mut Rng) -> u8 {
+    // Compact register index 1..=7 maps to x9..=x15, never the x8 scratch base.
+    1 + (rng.next_u64() % 7) as u8
+}
+
+fn compact_src(rng: &mut Rng) -> u8 {
+    (rng.next_u64() & 7) as u8
+}
+
+fn nonzero_reg(rng: &mut Rng) -> u8 {
+    1 + (rng.next_u64() % 31) as u8
+}
+
+fn word_offset(rng: &mut Rng) -> u16 {
+    ((rng.next_u64() % 32) * 4) as u16
+}
+
+fn double_offset(rng: &mut Rng) -> u16 {
+    ((rng.next_u64() % 32) * 8) as u16
+}
+
+fn encode_ci(funct3: u16, rd: u8, imm6: u8) -> u16 {
+    debug_assert!(funct3 < 8 && rd < 32 && imm6 < 64);
+    (funct3 << 13)
+        | (u16::from(imm6 >> 5) << 12)
+        | (u16::from(rd) << 7)
+        | (u16::from(imm6 & 0x1f) << 2)
+        | 0b01
+}
+
+fn encode_cb_imm(selector: u16, rd_prime: u8, imm6: u8) -> u16 {
+    debug_assert!(selector < 3 && rd_prime < 8 && imm6 < 64);
+    (0b100 << 13)
+        | (u16::from(imm6 >> 5) << 12)
+        | (selector << 10)
+        | (u16::from(rd_prime) << 7)
+        | (u16::from(imm6 & 0x1f) << 2)
+        | 0b01
+}
+
+fn encode_ca(high_bit: u16, funct2: u16, rd_prime: u8, rs2_prime: u8) -> u16 {
+    debug_assert!(high_bit < 2 && funct2 < 4 && rd_prime < 8 && rs2_prime < 8);
+    (0b100 << 13)
+        | (high_bit << 12)
+        | (0b11 << 10)
+        | (u16::from(rd_prime) << 7)
+        | (funct2 << 5)
+        | (u16::from(rs2_prime) << 2)
+        | 0b01
+}
+
+fn encode_ci_shift(rd: u8, shamt: u8) -> u16 {
+    debug_assert!(rd < 32 && shamt < 64);
+    (u16::from(shamt >> 5) << 12) | (u16::from(rd) << 7) | (u16::from(shamt & 0x1f) << 2) | 0b10
+}
+
+fn encode_cr(high_bit: u16, rd: u8, rs2: u8) -> u16 {
+    debug_assert!(high_bit < 2 && rd < 32 && rs2 > 0 && rs2 < 32);
+    (0b100 << 13) | (high_bit << 12) | (u16::from(rd) << 7) | (u16::from(rs2) << 2) | 0b10
+}
+
+fn encode_compact_mem(funct3: u16, reg_prime: u8, offset: u16) -> u16 {
+    debug_assert!(matches!(funct3, 0b010 | 0b011 | 0b110 | 0b111));
+    debug_assert!(reg_prime > 0 && reg_prime < 8);
+    let offset_bits = if funct3 == 0b010 || funct3 == 0b110 {
+        debug_assert!(offset <= 124 && offset % 4 == 0);
+        (((offset >> 3) & 0x7) << 10) | (((offset >> 2) & 1) << 6) | (((offset >> 6) & 1) << 5)
+    } else {
+        debug_assert!(offset <= 248 && offset % 8 == 0);
+        (((offset >> 3) & 0x7) << 10) | (((offset >> 6) & 0x3) << 5)
+    };
+    (funct3 << 13) | offset_bits | (u16::from(reg_prime) << 2)
 }
 
 fn gen_int_alu(rng: &mut Rng) -> u32 {
@@ -544,6 +684,8 @@ fn gen_csr_single(rng: &mut Rng, selector: u64, out: &mut Vec<u32>) {
 
 #[cfg(test)]
 mod tests {
+    use rivemu_cpu_riscv::decode::{self, Op};
+
     use super::*;
 
     fn decode_i_imm(word: u32) -> i32 {
@@ -592,6 +734,83 @@ mod tests {
         assert_eq!(Suite::parse("fence-i"), Some(Suite::FenceI));
         assert_eq!(Suite::parse("smc"), Some(Suite::FenceI));
         assert_eq!(Suite::FenceI.name(), "fence-i-smc");
+    }
+
+    #[test]
+    fn compressed_suite_names_parse() {
+        assert_eq!(Suite::parse("compressed"), Some(Suite::Compressed));
+        assert_eq!(Suite::parse("rvc"), Some(Suite::Compressed));
+        assert_eq!(Suite::parse("c"), Some(Suite::Compressed));
+        assert_eq!(Suite::Compressed.name(), "rv64c");
+    }
+
+    #[test]
+    fn compressed_generator_is_exact_legal_and_scratch_safe() {
+        const SCRATCH_LEN: i32 = 4096;
+
+        for seed in 1..=128 {
+            let mut rng = Rng::new(seed);
+            let halfwords = generate_compressed_block(&mut rng, 128);
+            assert_eq!(halfwords.len(), 128);
+
+            for raw in halfwords {
+                assert_ne!(raw & 3, 3, "seed {seed:#x}, raw {raw:#06x}");
+                let insn = decode::decode_compressed(raw);
+                assert_ne!(insn.op, Op::Illegal, "seed {seed:#x}, raw {raw:#06x}");
+                assert_eq!(insn.len, 2, "seed {seed:#x}, raw {raw:#06x}");
+                assert_eq!(insn.raw, u32::from(raw));
+                assert!(
+                    matches!(
+                        insn.op,
+                        Op::Addi
+                            | Op::Addiw
+                            | Op::Lui
+                            | Op::Srli
+                            | Op::Srai
+                            | Op::Andi
+                            | Op::Sub
+                            | Op::Xor
+                            | Op::Or
+                            | Op::And
+                            | Op::Subw
+                            | Op::Addw
+                            | Op::Slli
+                            | Op::Add
+                            | Op::Lw
+                            | Op::Ld
+                            | Op::Sw
+                            | Op::Sd
+                    ),
+                    "unexpected operation for seed {seed:#x}, raw {raw:#06x}: {insn:?}"
+                );
+
+                match insn.op {
+                    Op::Lw | Op::Ld => {
+                        let width = if insn.op == Op::Lw { 4 } else { 8 };
+                        assert_eq!(insn.rs1, 8);
+                        assert!((9..=15).contains(&insn.rd));
+                        assert!(insn.imm >= 0 && insn.imm + width <= SCRATCH_LEN);
+                        assert_eq!(insn.imm % width, 0);
+                    }
+                    Op::Sw | Op::Sd => {
+                        let width = if insn.op == Op::Sw { 4 } else { 8 };
+                        assert_eq!(insn.rs1, 8);
+                        assert!((9..=15).contains(&insn.rs2));
+                        assert!(insn.imm >= 0 && insn.imm + width <= SCRATCH_LEN);
+                        assert_eq!(insn.imm % width, 0);
+                    }
+                    Op::Lui => {
+                        assert_ne!(insn.rd, 2);
+                        assert_ne!(insn.rd, 8);
+                        assert_ne!(insn.imm, 0);
+                    }
+                    _ => assert_ne!(
+                        insn.rd, 8,
+                        "x8 scratch base clobber for seed {seed:#x}, raw {raw:#06x}: {insn:?}"
+                    ),
+                }
+            }
+        }
     }
 
     #[test]

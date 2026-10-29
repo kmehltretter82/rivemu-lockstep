@@ -4,9 +4,9 @@ use std::fmt;
 
 use rivemu_cpu_riscv::decode;
 
-use crate::risu::encode::build_trap_handler;
+use crate::risu::encode::{EBREAK, build_trap_handler};
 use crate::risu::seed::Rng;
-use crate::risu::suite::{Suite, generate_block};
+use crate::risu::suite::{Suite, generate_block, generate_compressed_block};
 use crate::target::{QemuGdbTarget, RivemuTarget};
 use crate::{ArchState, CosimTarget, FieldDiff, StopReason, TargetError};
 
@@ -41,7 +41,21 @@ pub struct RisuCase {
 impl RisuCase {
     /// Generates a deterministic case without executing either target.
     pub fn generate(suite: Suite, seed: u64, num_insns: usize) -> Result<Self, TargetError> {
-        if num_insns == 0 || num_insns >= ((TRAP_BASE - CODE_BASE) / 4) as usize {
+        if num_insns == 0 {
+            return Err(TargetError::Protocol(
+                "instruction count must be nonzero and fit below the trap handler".into(),
+            ));
+        }
+        let bytes_per_insn = if suite == Suite::Compressed { 2 } else { 4 };
+        let minimum_code_len = num_insns
+            .checked_mul(bytes_per_insn)
+            .and_then(|len| len.checked_add(4))
+            .ok_or_else(|| {
+                TargetError::Protocol(
+                    "instruction count must be nonzero and fit below the trap handler".into(),
+                )
+            })?;
+        if minimum_code_len as u64 > TRAP_BASE - CODE_BASE {
             return Err(TargetError::Protocol(
                 "instruction count must be nonzero and fit below the trap handler".into(),
             ));
@@ -49,14 +63,33 @@ impl RisuCase {
 
         let mut rng = Rng::new(seed);
         let init_state = rng.seed_state(CODE_BASE, SCRATCH_BASE);
-        let insns = generate_block(&mut rng, suite, num_insns);
-        let mut code_bytes = Vec::with_capacity(insns.len() * 4);
-        for &word in &insns {
-            code_bytes.extend_from_slice(&word.to_le_bytes());
-        }
+        let (code_bytes, generated_insns) = if suite == Suite::Compressed {
+            let insns = generate_compressed_block(&mut rng, num_insns);
+            let mut bytes = Vec::with_capacity(insns.len() * 2 + 4);
+            for &half in &insns {
+                bytes.extend_from_slice(&half.to_le_bytes());
+            }
+            bytes.extend_from_slice(&EBREAK.to_le_bytes());
+            (bytes, insns.len())
+        } else {
+            let insns = generate_block(&mut rng, suite, num_insns);
+            let generated_insns = insns.len().checked_sub(1).ok_or_else(|| {
+                TargetError::Protocol("generated block is missing its checkpoint".into())
+            })?;
+            let mut bytes = Vec::with_capacity(insns.len() * 4);
+            for &word in &insns {
+                bytes.extend_from_slice(&word.to_le_bytes());
+            }
+            (bytes, generated_insns)
+        };
         if code_bytes.len() as u64 > TRAP_BASE - CODE_BASE {
             return Err(TargetError::Protocol(
                 "generated block overlaps the trap handler".into(),
+            ));
+        }
+        if code_bytes.len() < 4 || code_bytes[code_bytes.len() - 4..] != EBREAK.to_le_bytes() {
+            return Err(TargetError::Protocol(
+                "generated block is missing its final EBREAK checkpoint".into(),
             ));
         }
 
@@ -65,8 +98,13 @@ impl RisuCase {
             chunk.copy_from_slice(&rng.edge_u64().to_le_bytes());
         }
 
-        let end_pc = CODE_BASE + ((insns.len() - 1) * 4) as u64;
-        let max_steps = insns.len() * 16 + 64;
+        let end_pc = CODE_BASE
+            .checked_add((code_bytes.len() - 4) as u64)
+            .ok_or_else(|| TargetError::Protocol("generated block address overflow".into()))?;
+        let max_steps = generated_insns
+            .checked_mul(16)
+            .and_then(|steps| steps.checked_add(64))
+            .ok_or_else(|| TargetError::Protocol("generated step limit overflow".into()))?;
         Ok(Self {
             suite,
             seed,
@@ -80,7 +118,10 @@ impl RisuCase {
 
     /// Whether this case reads or writes the seeded scratch buffer.
     pub const fn uses_scratch(&self) -> bool {
-        matches!(self.suite, Suite::SandboxMem | Suite::All)
+        matches!(
+            self.suite,
+            Suite::SandboxMem | Suite::Compressed | Suite::All
+        )
     }
 
     /// Suite used to generate this case.
@@ -130,8 +171,10 @@ pub struct BisectReport {
     pub step_index: usize,
     /// PC of the diverging instruction.
     pub pc: u64,
-    /// Raw 32-bit instruction encoding at `pc`.
+    /// Raw instruction encoding at `pc`, zero-extended to 32 bits.
     pub insn_word: u32,
+    /// Encoded instruction length in bytes (2 or 4).
+    pub insn_len: u8,
     /// Decoded `rivemu` instruction structure.
     pub decoded: String,
     /// Architectural state immediately *before* the diverging instruction executed.
@@ -158,11 +201,23 @@ impl fmt::Display for BisectReport {
             self.step_index,
             self.pc
         )?;
-        writeln!(
-            f,
-            "  Instruction : {:#010x}   decoded = {}",
-            self.insn_word, self.decoded
-        )?;
+        match self.insn_len {
+            2 => writeln!(
+                f,
+                "  Instruction : {:#06x} (16-bit)   decoded = {}",
+                self.insn_word, self.decoded
+            )?,
+            4 => writeln!(
+                f,
+                "  Instruction : {:#010x} (32-bit)   decoded = {}",
+                self.insn_word, self.decoded
+            )?,
+            len => writeln!(
+                f,
+                "  Instruction : {:#010x} ({len}-byte)   decoded = {}",
+                self.insn_word, self.decoded
+            )?,
+        }
         writeln!(
             f,
             "  Pre-fcsr    : {:#04x} (frm={}, fflags={:#04x})",
@@ -181,6 +236,35 @@ impl fmt::Display for BisectReport {
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FetchedInsn {
+    raw: u32,
+    len: u8,
+    decoded: decode::Insn,
+}
+
+fn fetch_and_decode<T: CosimTarget>(target: &mut T, pc: u64) -> Result<FetchedInsn, TargetError> {
+    let mut low_bytes = [0u8; 2];
+    target.read_ram(pc, &mut low_bytes)?;
+    let low = u16::from_le_bytes(low_bytes);
+    if low & 3 != 3 {
+        return Ok(FetchedInsn {
+            raw: u32::from(low),
+            len: 2,
+            decoded: decode::decode_compressed(low),
+        });
+    }
+
+    let mut high_bytes = [0u8; 2];
+    target.read_ram(pc + 2, &mut high_bytes)?;
+    let raw = u32::from(low) | (u32::from(u16::from_le_bytes(high_bytes)) << 16);
+    Ok(FetchedInsn {
+        raw,
+        len: 4,
+        decoded: decode::decode(raw),
+    })
 }
 
 /// Persistent `RISU` lockstep harness driving a candidate and reference target.
@@ -366,9 +450,7 @@ impl<C: CosimTarget, R: CosimTarget> RisuHarness<C, R> {
             if pc == case.end_pc {
                 break;
             }
-            let mut word_bytes = [0u8; 4];
-            self.candidate.read_ram(pc, &mut word_bytes)?;
-            let insn_word = u32::from_le_bytes(word_bytes);
+            let insn = fetch_and_decode(&mut self.candidate, pc)?;
 
             self.candidate.step_one()?;
             self.reference.step_one()?;
@@ -380,14 +462,14 @@ impl<C: CosimTarget, R: CosimTarget> RisuHarness<C, R> {
                 diffs.extend(scratch_diffs(&mut self.candidate, &mut self.reference)?);
             }
             if !diffs.is_empty() {
-                let decoded = format!("{:?}", decode::decode(insn_word));
                 return Ok(Some(BisectReport {
                     suite: case.suite,
                     seed: case.seed,
                     step_index,
                     pc,
-                    insn_word,
-                    decoded,
+                    insn_word: insn.raw,
+                    insn_len: insn.len,
+                    decoded: format!("{:?}", insn.decoded),
                     pre_state,
                     candidate_name: self.candidate.name(),
                     reference_name: self.reference.name(),
@@ -425,9 +507,7 @@ impl<C: CosimTarget, R: CosimTarget> RisuHarness<C, R> {
             }
 
             let pc = pre_state.pc;
-            let mut word_bytes = [0u8; 4];
-            self.candidate.read_ram(pc, &mut word_bytes)?;
-            let insn_word = u32::from_le_bytes(word_bytes);
+            let insn = fetch_and_decode(&mut self.candidate, pc)?;
 
             self.candidate.step_one()?;
             self.reference.step_one()?;
@@ -444,8 +524,9 @@ impl<C: CosimTarget, R: CosimTarget> RisuHarness<C, R> {
                     seed: case.seed,
                     step_index,
                     pc,
-                    insn_word,
-                    decoded: format!("{:?}", decode::decode(insn_word)),
+                    insn_word: insn.raw,
+                    insn_len: insn.len,
+                    decoded: format!("{:?}", insn.decoded),
                     pre_state,
                     candidate_name: self.candidate.name(),
                     reference_name: self.reference.name(),
@@ -532,6 +613,8 @@ fn verify_seeded_scratch<C: CosimTarget, R: CosimTarget>(
 mod tests {
     use std::collections::BTreeMap;
 
+    use rivemu_cpu_riscv::decode::Op;
+
     use super::*;
 
     #[derive(Default)]
@@ -597,7 +680,11 @@ mod tests {
                     "trap vector was not reinstalled".into(),
                 ));
             }
-            self.state.pc += 4;
+            let low = u16::from_le_bytes([
+                self.ram.get(&self.state.pc).copied().unwrap_or(0),
+                self.ram.get(&(self.state.pc + 1)).copied().unwrap_or(0),
+            ]);
+            self.state.pc += if low & 3 == 3 { 4 } else { 2 };
             if self.diverge_on_step == Some(self.steps) {
                 self.state.x[1] ^= 1;
             }
@@ -643,6 +730,41 @@ mod tests {
     }
 
     #[test]
+    fn compressed_case_has_exact_checkpoint_layout() {
+        let case = RisuCase::generate(Suite::Compressed, 0x1234, 17).unwrap();
+
+        assert!(case.uses_scratch());
+        assert_eq!(case.code_bytes().len(), 17 * 2 + 4);
+        assert_eq!(case.end_pc(), CODE_BASE + 17 * 2);
+        assert_eq!(case.max_steps(), 17 * 16 + 64);
+        assert_eq!(&case.code_bytes()[17 * 2..], &EBREAK.to_le_bytes());
+        for bytes in case.code_bytes()[..17 * 2].chunks_exact(2) {
+            let raw = u16::from_le_bytes(bytes.try_into().unwrap());
+            let insn = decode::decode_compressed(raw);
+            assert_eq!(insn.len, 2);
+            assert_ne!(insn.op, Op::Illegal);
+        }
+    }
+
+    #[test]
+    fn fetch_and_decode_handles_16_and_32_bit_instructions() {
+        let mut target = MockTarget::default();
+        target
+            .load_ram(CODE_BASE, &[0x05, 0x45, 0x73, 0x00, 0x10, 0x00])
+            .unwrap();
+
+        let compressed = fetch_and_decode(&mut target, CODE_BASE).unwrap();
+        assert_eq!((compressed.raw, compressed.len), (0x4505, 2));
+        assert_eq!(compressed.decoded.op, Op::Addi);
+        assert_eq!(compressed.decoded.len, 2);
+
+        let full = fetch_and_decode(&mut target, CODE_BASE + 2).unwrap();
+        assert_eq!((full.raw, full.len), (EBREAK, 4));
+        assert_eq!(full.decoded.op, Op::Ebreak);
+        assert_eq!(full.decoded.len, 4);
+    }
+
+    #[test]
     fn block_mode_rejects_non_replayable_references() {
         let reference = MockTarget {
             non_replayable: true,
@@ -684,7 +806,31 @@ mod tests {
             .unwrap()
             .expect("the first instruction must diverge");
         assert_eq!(report.step_index, 0);
+        assert_eq!(report.insn_len, 4);
+        assert!(report.to_string().contains("(32-bit)"));
         assert!(report.diffs.iter().any(|diff| diff.name.starts_with("x1 ")));
+    }
+
+    #[test]
+    fn compressed_divergence_report_preserves_raw_width_metadata() {
+        let reference = MockTarget {
+            diverge_on_step: Some(0),
+            ..MockTarget::default()
+        };
+        let mut harness =
+            RisuHarness::from_targets(MockTarget::default(), reference, false).unwrap();
+        harness.set_step_check(true);
+
+        let report = harness
+            .run_seed(Suite::Compressed, 0x4321, 1)
+            .unwrap()
+            .expect("the first compressed instruction must diverge");
+        assert_eq!(report.insn_len, 2);
+        assert!(report.insn_word <= u32::from(u16::MAX));
+        assert_ne!(report.insn_word & 3, 3);
+        let rendered = report.to_string();
+        assert!(rendered.contains("(16-bit)"));
+        assert!(rendered.contains(&format!("{:#06x}", report.insn_word)));
     }
 
     #[test]
