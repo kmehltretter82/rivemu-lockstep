@@ -46,6 +46,7 @@ Available suites are:
 
 - `alu`: RV64 integer arithmetic and logical operations.
 - `control`: AUIPC, JAL/JALR, all six branch conditions, and bounded loops.
+- `fence-i`: guest self-modifying code and instruction-cache synchronization.
 - `mul`: RV64 multiply, divide, and remainder operations.
 - `bitmanip`: Zba, Zbb, Zbc, and Zbs operations.
 - `float`: F/D arithmetic, conversions, NaN boxing, rounding, and flags.

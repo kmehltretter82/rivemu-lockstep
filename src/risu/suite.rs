@@ -10,6 +10,8 @@ pub enum Suite {
     IntAlu,
     /// RV64I branches, jumps, link semantics, and PC-relative address formation.
     ControlFlow,
+    /// Self-modifying code with `FENCE.I` instruction-cache synchronization.
+    FenceI,
     /// RV64M 64-bit and 32-bit multiply, divide, and remainder operations.
     MulDiv,
     /// `Zba`, `Zbb`, `Zbc`, and `Zbs` bit-manipulation extensions.
@@ -30,6 +32,7 @@ impl Suite {
         match s.to_ascii_lowercase().as_str() {
             "alu" | "int" | "intalu" => Some(Self::IntAlu),
             "control" | "control-flow" | "branch" => Some(Self::ControlFlow),
+            "fencei" | "fence-i" | "smc" => Some(Self::FenceI),
             "mul" | "muldiv" | "m" => Some(Self::MulDiv),
             "bitmanip" | "zb" | "b" => Some(Self::Bitmanip),
             "float" | "fp" | "fd" => Some(Self::Float),
@@ -45,6 +48,7 @@ impl Suite {
         match self {
             Self::IntAlu => "int-alu",
             Self::ControlFlow => "control-flow",
+            Self::FenceI => "fence-i-smc",
             Self::MulDiv => "mul-div",
             Self::Bitmanip => "bitmanip",
             Self::Float => "float-fd",
@@ -60,13 +64,14 @@ pub fn generate_block(rng: &mut Rng, suite: Suite, num_insns: usize) -> Vec<u32>
     let mut out = Vec::with_capacity(num_insns + 4);
     while out.len() < num_insns {
         let active = match suite {
-            Suite::All => match rng.next_u64() % 7 {
+            Suite::All => match rng.next_u64() % 8 {
                 0 => Suite::IntAlu,
                 1 => Suite::ControlFlow,
-                2 => Suite::MulDiv,
-                3 => Suite::Bitmanip,
-                4 => Suite::Float,
-                5 => Suite::SandboxMem,
+                2 => Suite::FenceI,
+                3 => Suite::MulDiv,
+                4 => Suite::Bitmanip,
+                5 => Suite::Float,
+                6 => Suite::SandboxMem,
                 _ => Suite::CsrTrap,
             },
             other => other,
@@ -74,6 +79,7 @@ pub fn generate_block(rng: &mut Rng, suite: Suite, num_insns: usize) -> Vec<u32>
         match active {
             Suite::IntAlu => out.push(gen_int_alu(rng)),
             Suite::ControlFlow => gen_control_flow(rng, &mut out),
+            Suite::FenceI => gen_fence_i(&mut out),
             Suite::MulDiv => out.push(gen_mul_div(rng)),
             Suite::Bitmanip => out.push(gen_bitmanip(rng)),
             Suite::Float => out.push(gen_float(rng)),
@@ -160,6 +166,26 @@ fn gen_control_flow(rng: &mut Rng, out: &mut Vec<u32>) {
         }
         _ => gen_bounded_loop(out, ((rng.next_u64() & 3) + 1) as i32),
     }
+}
+
+/// Appends a self-modifying sequence that warms an instruction-cache entry,
+/// overwrites it through a guest store, executes `FENCE.I`, then re-enters it.
+/// The replacement changes `a0` from 1 to 2, making stale execution observable.
+fn gen_fence_i(out: &mut Vec<u32>) {
+    const SMC_SNIPPET: [u32; 11] = [
+        0x0000_0297, // auipc t0, 0
+        0x0242_8293, // addi  t0, t0, 36 (address of patch slot)
+        0x01c0_00ef, // jal   ra, +28 (execute original slot)
+        0x0020_0337, // lui   t1, 0x200
+        0x5133_0313, // addi  t1, t1, 0x513 => addi a0, zero, 2
+        0x0062_a023, // sw    t1, 0(t0)
+        0x0000_100f, // fence.i
+        0x0080_00ef, // jal   ra, +8 (execute replacement slot)
+        0x00c0_006f, // jal   zero, +12 (continue after snippet)
+        0x0010_0513, // patch slot: addi a0, zero, 1
+        0x0000_8067, // jalr  zero, 0(ra)
+    ];
+    out.extend_from_slice(&SMC_SNIPPET);
 }
 
 fn gen_conditional_branch(out: &mut Vec<u32>, funct3: u32, taken: bool, marker_rd: u8) {
@@ -488,6 +514,14 @@ mod tests {
     }
 
     #[test]
+    fn fence_i_suite_names_parse() {
+        assert_eq!(Suite::parse("fencei"), Some(Suite::FenceI));
+        assert_eq!(Suite::parse("fence-i"), Some(Suite::FenceI));
+        assert_eq!(Suite::parse("smc"), Some(Suite::FenceI));
+        assert_eq!(Suite::FenceI.name(), "fence-i-smc");
+    }
+
+    #[test]
     fn conditional_snippets_cover_every_branch_both_ways() {
         for funct3 in [0b000, 0b001, 0b100, 0b101, 0b110, 0b111] {
             for expected_taken in [false, true] {
@@ -539,6 +573,45 @@ mod tests {
         assert_eq!(decode_i_imm(words[1]), -1);
         assert_eq!((words[2] >> 12) & 7, 0b001);
         assert_eq!(decode_b_imm(words[2]), -4);
+    }
+
+    #[test]
+    fn fence_i_snippet_warms_patches_and_reenters_one_slot() {
+        let mut words = Vec::new();
+        gen_fence_i(&mut words);
+        assert_eq!(words.len(), 11);
+
+        let base = 0x8000_0100u64;
+        assert_eq!(words[0], 0x0000_0297); // auipc t0, 0
+        assert_eq!(decode_i_imm(words[1]), 36);
+        assert_eq!(
+            base + u64::try_from(decode_i_imm(words[1])).unwrap(),
+            base + 36
+        );
+
+        assert_eq!(base + 8 + decode_j_imm(words[2]) as u64, base + 36);
+        assert_eq!(base + 28 + decode_j_imm(words[7]) as u64, base + 36);
+        assert_eq!(base + 32 + decode_j_imm(words[8]) as u64, base + 44);
+
+        let replacement =
+            (words[3] & 0xffff_f000).wrapping_add(u32::try_from(decode_i_imm(words[4])).unwrap());
+        assert_eq!(replacement, 0x0020_0513); // addi a0, zero, 2
+        assert_eq!(words[9], 0x0010_0513); // original: addi a0, zero, 1
+
+        assert_eq!(words[5] & 0x7f, 0x23); // sw t1, 0(t0)
+        assert_eq!((words[5] >> 15) & 0x1f, 5);
+        assert_eq!((words[5] >> 20) & 0x1f, 6);
+        assert_eq!(words[6], 0x0000_100f); // fence.i
+        assert_eq!(words[10], 0x0000_8067); // jalr zero, 0(ra)
+    }
+
+    #[test]
+    fn repeated_fence_i_snippets_end_at_the_checkpoint() {
+        let mut rng = Rng::new(1);
+        let words = generate_block(&mut rng, Suite::FenceI, 12);
+        assert_eq!(words.len(), 23);
+        assert_eq!(&words[..11], &words[11..22]);
+        assert_eq!(words[22], EBREAK);
     }
 
     #[test]
