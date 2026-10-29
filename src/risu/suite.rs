@@ -84,7 +84,7 @@ pub fn generate_block(rng: &mut Rng, suite: Suite, num_insns: usize) -> Vec<u32>
             Suite::Bitmanip => out.push(gen_bitmanip(rng)),
             Suite::Float => out.push(gen_float(rng)),
             Suite::SandboxMem => gen_sandbox_mem(rng, &mut out),
-            Suite::CsrTrap => out.push(gen_csr_trap(rng)),
+            Suite::CsrTrap => gen_csr_trap(rng, &mut out),
             Suite::All => unreachable!(),
         }
     }
@@ -439,33 +439,106 @@ fn gen_sandbox_mem(rng: &mut Rng, out: &mut Vec<u32>) {
     out.push(insn);
 }
 
-fn gen_csr_trap(rng: &mut Rng) -> u32 {
+fn gen_csr_trap(rng: &mut Rng, out: &mut Vec<u32>) {
+    match rng.next_u64() % 23 {
+        0 => gen_csr_alias_set(out),
+        1 => gen_csr_alias_clear(out),
+        2 => gen_csr_immediate_forms(out),
+        3 => gen_csr_write_suppression(out),
+        4 => gen_read_only_csr_traps(out),
+        selector => gen_csr_single(rng, selector - 5, out),
+    }
+}
+
+fn gen_csr_alias_set(out: &mut Vec<u32>) {
+    out.extend([
+        i_type(0x13, 28, 0b000, 0, 0x105),
+        i_type(0x13, 29, 0b000, 0, 0x050),
+        i_type(0x73, 0, 0b001, 28, 0x340),  // csrw  mscratch, x28
+        i_type(0x73, 29, 0b010, 29, 0x340), // csrrs x29, mscratch, x29
+        i_type(0x73, 30, 0b010, 0, 0x340),  // csrr  x30, mscratch
+    ]);
+}
+
+fn gen_csr_alias_clear(out: &mut Vec<u32>) {
+    out.extend([
+        i_type(0x13, 28, 0b000, 0, 0x155),
+        i_type(0x13, 29, 0b000, 0, 0x050),
+        i_type(0x73, 0, 0b001, 28, 0x140),  // csrw  sscratch, x28
+        i_type(0x73, 29, 0b011, 29, 0x140), // csrrc x29, sscratch, x29
+        i_type(0x73, 30, 0b010, 0, 0x140),  // csrr  x30, sscratch
+    ]);
+}
+
+fn gen_csr_immediate_forms(out: &mut Vec<u32>) {
+    out.extend([
+        i_type(0x73, 31, 0b101, 0x1b, 0x340), // csrrwi x31, mscratch, 0x1b
+        i_type(0x73, 31, 0b110, 0x04, 0x340), // csrrsi x31, mscratch, 0x04
+        i_type(0x73, 31, 0b111, 0x03, 0x340), // csrrci x31, mscratch, 0x03
+        i_type(0x73, 31, 0b110, 0, 0x340),    // csrrsi x31, mscratch, 0
+        i_type(0x73, 30, 0b111, 0, 0x340),    // csrrci x30, mscratch, 0
+        i_type(0x73, 29, 0b010, 0, 0x340),    // csrr   x29, mscratch
+    ]);
+}
+
+fn gen_csr_write_suppression(out: &mut Vec<u32>) {
+    out.extend([
+        i_type(0x13, 28, 0b000, 0, 0x155),
+        i_type(0x13, 29, 0b000, 0, 0x002),
+        i_type(0x73, 0, 0b001, 28, 0x140), // csrw  sscratch, x28
+        i_type(0x73, 0, 0b010, 0, 0x140),  // csrrs x0, sscratch, x0
+        i_type(0x73, 0, 0b011, 0, 0x140),  // csrrc x0, sscratch, x0
+        i_type(0x73, 0, 0b010, 29, 0x140), // csrrs x0, sscratch, x29
+        i_type(0x73, 30, 0b010, 0, 0x140), // csrr  x30, sscratch
+        i_type(0x73, 0, 0b011, 29, 0x140), // csrrc x0, sscratch, x29
+        i_type(0x73, 31, 0b010, 0, 0x140), // csrr  x31, sscratch
+    ]);
+}
+
+fn gen_read_only_csr_traps(out: &mut Vec<u32>) {
+    out.extend([
+        i_type(0x73, 28, 0b010, 0, 0xf14), // csrrs  x28, mhartid, x0
+        i_type(0x73, 29, 0b011, 0, 0xf14), // csrrc  x29, mhartid, x0
+        i_type(0x73, 30, 0b110, 0, 0xf14), // csrrsi x30, mhartid, 0
+        i_type(0x73, 31, 0b111, 0, 0xf14), // csrrci x31, mhartid, 0
+        i_type(0x13, 31, 0b000, 0, 0x05a),
+        i_type(0x73, 31, 0b001, 0, 0xf14), // csrrw  x31, mhartid, x0: illegal
+        i_type(0x13, 31, 0b000, 0, 0x05a),
+        i_type(0x73, 31, 0b101, 0, 0xf14), // csrrwi x31, mhartid, 0: illegal
+    ]);
+}
+
+fn gen_csr_single(rng: &mut Rng, selector: u64, out: &mut Vec<u32>) {
     let rd = rng.pick_gpr();
     let rs1 = rng.pick_src_gpr();
-    match rng.next_u64() % 18 {
+    let (insn, readback_csr) = match selector {
         // Safe CSR reads/writes. Keep WLRL/WARL values portable across
         // implementations so exact-value differential comparison is meaningful.
-        0 => i_type(0x73, rd, 0b001, rs1, 0x340), // csrrw rd, mscratch, rs1
-        1 => i_type(0x73, rd, 0b010, rs1, 0x340), // csrrs rd, mscratch, rs1
-        2 => i_type(0x73, rd, 0b011, rs1, 0x340), // csrrc rd, mscratch, rs1
-        3 => i_type(0x73, rd, 0b001, rs1, 0x140), // csrrw rd, sscratch, rs1
-        4 => i_type(0x73, rd, 0b001, rs1, 0x001), // csrrw rd, fflags, rs1
-        5 => i_type(0x73, rd, 0b101, 0, 0x002),   // csrrwi rd, frm, RNE
-        6 => i_type(0x73, rd, 0b101, 0, 0x003),   // csrrwi rd, fcsr, 0
+        0 => (i_type(0x73, rd, 0b001, rs1, 0x340), Some(0x340)),
+        1 => (i_type(0x73, rd, 0b010, rs1, 0x340), Some(0x340)),
+        2 => (i_type(0x73, rd, 0b011, rs1, 0x340), Some(0x340)),
+        3 => (i_type(0x73, rd, 0b001, rs1, 0x140), Some(0x140)),
+        4 => (i_type(0x73, rd, 0b001, rs1, 0x001), None),
+        5 => (i_type(0x73, rd, 0b101, 0, 0x002), None),
+        6 => (i_type(0x73, rd, 0b101, 0, 0x003), None),
         // mvendorid, marchid, mimpid, and misa are deliberately excluded: their
         // values legitimately differ between rivemu and QEMU. mhartid is safe for -smp 1.
-        7 => i_type(0x73, rd, 0b010, 0, 0xf14), // csrr rd, mhartid
-        8 => i_type(0x73, rd, 0b101, 2, 0x142), // csrrwi rd, scause, illegal-insn
-        9 => i_type(0x73, rd, 0b010, rs1, 0x001), // csrrs rd, fflags, rs1
-        10 => i_type(0x73, rd, 0b101, 0, 0x143), // csrrwi rd, stval, 0
-        11 => i_type(0x73, rd, 0b010, rs1, 0x140), // csrrs rd, sscratch, rs1
-        12 => i_type(0x73, rd, 0b101, 0, 0x341), // csrrwi rd, mepc, 0
-        13 => i_type(0x73, rd, 0b101, 0, 0x141), // csrrwi rd, sepc, 0
-        14 => i_type(0x73, rd, 0b101, 0, 0x105), // csrrwi rd, stvec, direct@0
-        15 => i_type(0x73, rd, 0b101, 0, 0x180), // csrrwi rd, satp, bare
+        7 => (i_type(0x73, rd, 0b010, 0, 0xf14), None),
+        8 => (i_type(0x73, rd, 0b101, 2, 0x142), None),
+        9 => (i_type(0x73, rd, 0b010, rs1, 0x001), None),
+        10 => (i_type(0x73, rd, 0b101, 0, 0x143), None),
+        11 => (i_type(0x73, rd, 0b010, rs1, 0x140), Some(0x140)),
+        12 => (i_type(0x73, rd, 0b101, 0, 0x341), None),
+        13 => (i_type(0x73, rd, 0b101, 0, 0x141), None),
+        14 => (i_type(0x73, rd, 0b101, 0, 0x105), None),
+        15 => (i_type(0x73, rd, 0b101, 0, 0x180), None),
         // Synchronous traps caught by our M-mode handler at mtvec = 0x8000_2000:
-        16 => 0x0000_0073, // ecall (from M-mode -> mcause = 11, mtval = 0)
-        _ => 0x0000_7003,  // illegal 32-bit instruction (LOAD with reserved funct3 = 0b111)
+        16 => (0x0000_0073, None), // ecall (from M-mode -> mcause = 11)
+        _ => (0x0000_7003, None),  // illegal 32-bit instruction
+    };
+    out.push(insn);
+    if let Some(csr) = readback_csr {
+        out.push(i_type(0x73, 31, 0b010, 0, csr));
     }
 }
 
@@ -612,6 +685,118 @@ mod tests {
         assert_eq!(words.len(), 23);
         assert_eq!(&words[..11], &words[11..22]);
         assert_eq!(words[22], EBREAK);
+    }
+
+    fn simulate_scratch_csr(words: &[u32], expected_csr: u16) -> ([u64; 32], u64) {
+        let mut regs = [0u64; 32];
+        let mut csr = 0u64;
+        for &word in words {
+            match word & 0x7f {
+                0x13 => {
+                    let rd = ((word >> 7) & 0x1f) as usize;
+                    let rs1 = ((word >> 15) & 0x1f) as usize;
+                    if rd != 0 {
+                        regs[rd] = regs[rs1].wrapping_add_signed(i64::from(decode_i_imm(word)));
+                    }
+                }
+                0x73 => {
+                    assert_eq!((word >> 20) as u16, expected_csr);
+                    let rd = ((word >> 7) & 0x1f) as usize;
+                    let funct3 = (word >> 12) & 7;
+                    let rs1_or_zimm = ((word >> 15) & 0x1f) as usize;
+                    let source = if funct3 >= 0b101 {
+                        rs1_or_zimm as u64
+                    } else {
+                        regs[rs1_or_zimm]
+                    };
+                    let old = csr;
+                    match funct3 {
+                        0b001 | 0b101 => csr = source,
+                        0b010 | 0b110 if source != 0 => csr |= source,
+                        0b011 | 0b111 if source != 0 => csr &= !source,
+                        0b010 | 0b011 | 0b110 | 0b111 => {}
+                        _ => panic!("unexpected CSR funct3 {funct3:#x}"),
+                    }
+                    if rd != 0 {
+                        regs[rd] = old;
+                    }
+                }
+                opcode => panic!("unexpected opcode {opcode:#x}"),
+            }
+            regs[0] = 0;
+        }
+        (regs, csr)
+    }
+
+    #[test]
+    fn csr_alias_templates_use_original_source_values() {
+        let mut set_words = Vec::new();
+        gen_csr_alias_set(&mut set_words);
+        let (set_regs, set_csr) = simulate_scratch_csr(&set_words, 0x340);
+        assert_eq!(set_words.len(), 5);
+        assert_eq!(set_regs[29], 0x105);
+        assert_eq!(set_regs[30], 0x155);
+        assert_eq!(set_csr, 0x155);
+
+        let mut clear_words = Vec::new();
+        gen_csr_alias_clear(&mut clear_words);
+        let (clear_regs, clear_csr) = simulate_scratch_csr(&clear_words, 0x140);
+        assert_eq!(clear_words.len(), 5);
+        assert_eq!(clear_regs[29], 0x155);
+        assert_eq!(clear_regs[30], 0x105);
+        assert_eq!(clear_csr, 0x105);
+    }
+
+    #[test]
+    fn csr_immediate_and_suppression_templates_expose_final_values() {
+        let mut immediate_words = Vec::new();
+        gen_csr_immediate_forms(&mut immediate_words);
+        let (immediate_regs, immediate_csr) = simulate_scratch_csr(&immediate_words, 0x340);
+        assert_eq!(immediate_words.len(), 6);
+        assert_eq!(immediate_regs[29], 0x1c);
+        assert_eq!(immediate_regs[30], 0x1c);
+        assert_eq!(immediate_regs[31], 0x1c);
+        assert_eq!(immediate_csr, 0x1c);
+
+        let mut suppression_words = Vec::new();
+        gen_csr_write_suppression(&mut suppression_words);
+        let (suppression_regs, suppression_csr) = simulate_scratch_csr(&suppression_words, 0x140);
+        assert_eq!(suppression_words.len(), 9);
+        assert_eq!(suppression_regs[30], 0x157);
+        assert_eq!(suppression_regs[31], 0x155);
+        assert_eq!(suppression_csr, 0x155);
+    }
+
+    #[test]
+    fn read_only_csr_template_has_legal_reads_and_illegal_writes() {
+        let mut words = Vec::new();
+        gen_read_only_csr_traps(&mut words);
+        assert_eq!(words.len(), 8);
+        for (index, expected_funct3) in [0b010, 0b011, 0b110, 0b111].into_iter().enumerate() {
+            assert_eq!((words[index] >> 20) & 0xfff, 0xf14);
+            assert_eq!((words[index] >> 12) & 7, expected_funct3);
+            assert_eq!((words[index] >> 15) & 0x1f, 0);
+        }
+        assert_eq!(decode_i_imm(words[4]), 0x5a);
+        assert_eq!((words[5] >> 20) & 0xfff, 0xf14);
+        assert_eq!((words[5] >> 12) & 7, 0b001);
+        assert_eq!(decode_i_imm(words[6]), 0x5a);
+        assert_eq!((words[7] >> 20) & 0xfff, 0xf14);
+        assert_eq!((words[7] >> 12) & 7, 0b101);
+    }
+
+    #[test]
+    fn random_scratch_mutations_append_a_gpr_readback() {
+        for selector in [0, 1, 2, 3, 11] {
+            let mut rng = Rng::new(selector + 1);
+            let mut words = Vec::new();
+            gen_csr_single(&mut rng, selector, &mut words);
+            assert_eq!(words.len(), 2);
+            assert_eq!((words[1] >> 7) & 0x1f, 31);
+            assert_eq!((words[1] >> 12) & 7, 0b010);
+            assert_eq!((words[1] >> 15) & 0x1f, 0);
+            assert_eq!((words[1] >> 20) & 0xfff, (words[0] >> 20) & 0xfff);
+        }
     }
 
     #[test]
