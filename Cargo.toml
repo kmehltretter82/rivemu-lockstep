@@ -1,0 +1,15 @@
+[package]
+name = "rivemu-lockstep"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85.0"
+license = "MIT OR Apache-2.0"
+description = "Differential lockstep cosimulator and system-mode RISU fuzzer for RISC-V (rivemu vs. QEMU)"
+
+[dependencies]
+rivemu-core = { path = "../qemu_rust/crates/rivemu-core" }
+rivemu-mem = { path = "../qemu_rust/crates/rivemu-mem" }
+rivemu-cpu-riscv = { path = "../qemu_rust/crates/rivemu-cpu-riscv" }
+rivemu-devices = { path = "../qemu_rust/crates/rivemu-devices" }
+rivemu-machine = { path = "../qemu_rust/crates/rivemu-machine" }
+thiserror = "2"
