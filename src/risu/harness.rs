@@ -4,12 +4,15 @@ use std::fmt;
 
 use rivemu_cpu_riscv::decode;
 
-use crate::risu::encode::{EBREAK, build_supervisor_trap_handler, build_trap_handler};
+use crate::risu::encode::{
+    EBREAK, build_supervisor_page_fault_handler, build_supervisor_trap_handler, build_trap_handler,
+};
 use crate::risu::fp_edges;
 use crate::risu::seed::Rng;
 use crate::risu::suite::{
     Suite, generate_block, generate_compressed_block, generate_privileged_block,
 };
+use crate::risu::sv39;
 use crate::target::{QemuGdbTarget, RivemuTarget};
 use crate::{ArchState, CosimTarget, FieldDiff, StopReason, TargetError};
 
@@ -19,6 +22,8 @@ pub const CODE_BASE: u64 = 0x8000_0000;
 pub const TRAP_BASE: u64 = 0x8000_2000;
 /// Guest physical address of the S-mode trap recovery handler (`stvec`).
 pub const S_TRAP_BASE: u64 = TRAP_BASE + 0x100;
+/// Guest physical address of the Sv39 page-fault recovery handler (`stvec`).
+pub const SV39_TRAP_BASE: u64 = S_TRAP_BASE + 0x100;
 /// Guest physical address of the sandboxed 4 KiB scratch RAM buffer (`s0`).
 pub const SCRATCH_BASE: u64 = 0x8001_0000;
 /// Size of the seeded scratch buffer, including the end of unaligned accesses.
@@ -37,6 +42,8 @@ pub struct RisuCase {
     code_bytes: Vec<u8>,
     /// Seeded scratch-memory contents.
     scratch: Vec<u8>,
+    /// Optional contiguous VM setup image (alternate page plus page tables).
+    vm_setup: Vec<u8>,
     /// Address of the final `EBREAK` checkpoint.
     end_pc: u64,
     /// Maximum dynamic instruction attempts before the case is considered non-terminating.
@@ -74,6 +81,11 @@ impl RisuCase {
         if suite == Suite::Privileged {
             configure_privileged_initial_state(seed, &mut init_state);
         }
+        let vm_setup = if suite == Suite::Sv39 {
+            sv39::configure_case(seed, &mut init_state)
+        } else {
+            Vec::new()
+        };
         let (code_bytes, generated_insns) = if suite == Suite::Compressed {
             let insns = generate_compressed_block(&mut rng, num_insns);
             let mut bytes = Vec::with_capacity(insns.len() * 2 + 4);
@@ -83,10 +95,10 @@ impl RisuCase {
             bytes.extend_from_slice(&EBREAK.to_le_bytes());
             (bytes, insns.len())
         } else {
-            let insns = if suite == Suite::Privileged {
-                generate_privileged_block(&mut rng, seed, num_insns)
-            } else {
-                generate_block(&mut rng, suite, num_insns)
+            let insns = match suite {
+                Suite::Privileged => generate_privileged_block(&mut rng, seed, num_insns),
+                Suite::Sv39 => sv39::generate_block(&mut rng, seed, num_insns),
+                _ => generate_block(&mut rng, suite, num_insns),
             };
             let generated_insns = insns.len().checked_sub(1).ok_or_else(|| {
                 TargetError::Protocol("generated block is missing its checkpoint".into())
@@ -126,6 +138,7 @@ impl RisuCase {
             init_state,
             code_bytes,
             scratch,
+            vm_setup,
             end_pc,
             max_steps,
         })
@@ -135,7 +148,7 @@ impl RisuCase {
     pub const fn uses_scratch(&self) -> bool {
         matches!(
             self.suite,
-            Suite::SandboxMem | Suite::Atomics | Suite::Compressed | Suite::All
+            Suite::SandboxMem | Suite::Sv39 | Suite::Atomics | Suite::Compressed | Suite::All
         )
     }
 
@@ -162,6 +175,11 @@ impl RisuCase {
     /// Seeded scratch-memory contents.
     pub fn scratch(&self) -> &[u8] {
         &self.scratch
+    }
+
+    /// Optional contiguous alternate-page and page-table setup image.
+    pub fn vm_setup(&self) -> &[u8] {
+        &self.vm_setup
     }
 
     /// Address of the final `EBREAK` checkpoint.
@@ -384,12 +402,17 @@ impl<C: CosimTarget, R: CosimTarget> RisuHarness<C, R> {
                 reference.name()
             )));
         }
+        candidate.prepare_case_memory()?;
+        reference.prepare_case_memory()?;
         let handler = build_trap_handler();
         let supervisor_handler = build_supervisor_trap_handler();
+        let paging_handler = build_supervisor_page_fault_handler();
         candidate.load_ram(TRAP_BASE, &handler)?;
         reference.load_ram(TRAP_BASE, &handler)?;
         candidate.load_ram(S_TRAP_BASE, &supervisor_handler)?;
         reference.load_ram(S_TRAP_BASE, &supervisor_handler)?;
+        candidate.load_ram(SV39_TRAP_BASE, &paging_handler)?;
+        reference.load_ram(SV39_TRAP_BASE, &paging_handler)?;
         candidate.set_trap_vector(TRAP_BASE)?;
         reference.set_trap_vector(TRAP_BASE)?;
         Ok(Self {
@@ -419,10 +442,11 @@ impl<C: CosimTarget, R: CosimTarget> RisuHarness<C, R> {
 
     /// Runs an already materialized case identically on candidate and reference.
     pub fn run_case(&mut self, case: &RisuCase) -> Result<Option<BisectReport>, TargetError> {
-        if case.suite == Suite::Privileged && !self.check_csrs {
-            return Err(TargetError::Protocol(
-                "privileged suite requires privileged CSR comparison".into(),
-            ));
+        if matches!(case.suite, Suite::Privileged | Suite::Sv39) && !self.check_csrs {
+            return Err(TargetError::Protocol(format!(
+                "{} suite requires privileged CSR comparison",
+                case.suite.name()
+            )));
         }
         if !self.step_check
             && (!self.candidate.supports_replay() || !self.reference.supports_replay())
@@ -443,12 +467,7 @@ impl<C: CosimTarget, R: CosimTarget> RisuHarness<C, R> {
             )));
         }
         self.case_started = true;
-        self.candidate.load_ram(CODE_BASE, &case.code_bytes)?;
-        self.reference.load_ram(CODE_BASE, &case.code_bytes)?;
-        if case.uses_scratch() {
-            self.candidate.load_ram(SCRATCH_BASE, &case.scratch)?;
-            self.reference.load_ram(SCRATCH_BASE, &case.scratch)?;
-        }
+        self.load_case_memory(case)?;
         self.candidate.set_state(&case.init_state)?;
         self.reference.set_state(&case.init_state)?;
         self.candidate.set_trap_vector(TRAP_BASE)?;
@@ -500,12 +519,7 @@ impl<C: CosimTarget, R: CosimTarget> RisuHarness<C, R> {
     }
 
     fn bisect_block(&mut self, case: &RisuCase) -> Result<Option<BisectReport>, TargetError> {
-        self.candidate.load_ram(CODE_BASE, &case.code_bytes)?;
-        self.reference.load_ram(CODE_BASE, &case.code_bytes)?;
-        if case.uses_scratch() {
-            self.candidate.load_ram(SCRATCH_BASE, &case.scratch)?;
-            self.reference.load_ram(SCRATCH_BASE, &case.scratch)?;
-        }
+        self.load_case_memory(case)?;
         self.candidate.set_state(&case.init_state)?;
         self.reference.set_state(&case.init_state)?;
         self.candidate.set_trap_vector(TRAP_BASE)?;
@@ -629,6 +643,24 @@ impl<C: CosimTarget, R: CosimTarget> RisuHarness<C, R> {
             case.end_pc, case.max_steps, case.seed
         )))
     }
+
+    fn load_case_memory(&mut self, case: &RisuCase) -> Result<(), TargetError> {
+        self.candidate.prepare_case_memory()?;
+        self.reference.prepare_case_memory()?;
+        self.candidate.load_ram(CODE_BASE, &case.code_bytes)?;
+        self.reference.load_ram(CODE_BASE, &case.code_bytes)?;
+        if case.uses_scratch() {
+            self.candidate.load_ram(SCRATCH_BASE, &case.scratch)?;
+            self.reference.load_ram(SCRATCH_BASE, &case.scratch)?;
+        }
+        if !case.vm_setup.is_empty() {
+            self.candidate
+                .load_ram(sv39::VM_SETUP_BASE, &case.vm_setup)?;
+            self.reference
+                .load_ram(sv39::VM_SETUP_BASE, &case.vm_setup)?;
+        }
+        Ok(())
+    }
 }
 
 fn require_checkpoint(target: &str, pc: u64, reason: StopReason) -> Result<(), TargetError> {
@@ -703,6 +735,7 @@ mod tests {
         state: ArchState,
         ram: BTreeMap<u64, u8>,
         trap_installed: bool,
+        prepare_calls: usize,
         steps: usize,
         diverge_on_step: Option<usize>,
         corrupt_scratch: bool,
@@ -717,6 +750,11 @@ mod tests {
 
         fn supports_replay(&self) -> bool {
             !self.non_replayable
+        }
+
+        fn prepare_case_memory(&mut self) -> Result<(), TargetError> {
+            self.prepare_calls += 1;
+            Ok(())
         }
 
         fn load_ram(&mut self, gpa: u64, data: &[u8]) -> Result<(), TargetError> {
@@ -802,10 +840,15 @@ mod tests {
             RisuHarness::from_targets(MockTarget::default(), MockTarget::default(), false).unwrap();
         let machine = build_trap_handler();
         let supervisor = build_supervisor_trap_handler();
+        let paging = build_supervisor_page_fault_handler();
         let mut actual = vec![0; machine.len()];
 
+        assert_eq!(harness.candidate.prepare_calls, 1);
+        assert_eq!(harness.reference.prepare_calls, 1);
         assert!(TRAP_BASE + machine.len() as u64 <= S_TRAP_BASE);
         assert!(S_TRAP_BASE + supervisor.len() as u64 <= SCRATCH_BASE);
+        assert!(S_TRAP_BASE + supervisor.len() as u64 <= SV39_TRAP_BASE);
+        assert!(SV39_TRAP_BASE + paging.len() as u64 <= CODE_BASE + 3 * 4096);
         harness.candidate.read_ram(TRAP_BASE, &mut actual).unwrap();
         assert_eq!(actual, machine);
         actual.resize(supervisor.len(), 0);
@@ -814,6 +857,12 @@ mod tests {
             .read_ram(S_TRAP_BASE, &mut actual)
             .unwrap();
         assert_eq!(actual, supervisor);
+        actual.resize(paging.len(), 0);
+        harness
+            .candidate
+            .read_ram(SV39_TRAP_BASE, &mut actual)
+            .unwrap();
+        assert_eq!(actual, paging);
     }
 
     #[test]
@@ -826,6 +875,7 @@ mod tests {
         assert_eq!(first.init_state(), second.init_state());
         assert_eq!(first.code_bytes(), second.code_bytes());
         assert_eq!(first.scratch(), second.scratch());
+        assert_eq!(first.vm_setup(), second.vm_setup());
         assert_eq!(first.end_pc(), second.end_pc());
         assert_eq!(first.max_steps(), second.max_steps());
     }
@@ -896,6 +946,20 @@ mod tests {
     }
 
     #[test]
+    fn sv39_cases_materialize_page_tables_and_probe_alias() {
+        for seed in 0..8 {
+            let case = RisuCase::generate(Suite::Sv39, 0x5000 + seed, 32).unwrap();
+            assert!(case.uses_scratch());
+            assert_eq!(case.vm_setup().len(), sv39::VM_SETUP_LEN);
+            assert_eq!(case.init_state().x[8], sv39::PROBE_VA);
+            assert_eq!(case.init_state().satp >> 60, 8);
+            assert_eq!(case.init_state().stvec, SV39_TRAP_BASE);
+            assert_eq!(case.code_bytes().len(), 33 * 4);
+            assert_eq!(case.end_pc(), CODE_BASE + 32 * 4);
+        }
+    }
+
+    #[test]
     fn fetch_and_decode_handles_16_and_32_bit_instructions() {
         let mut target = MockTarget::default();
         target
@@ -933,6 +997,21 @@ mod tests {
         harness.set_step_check(true);
 
         let case = RisuCase::generate(Suite::Privileged, 0x2000, 8).unwrap();
+        let error = harness.run_case(&case).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires privileged CSR comparison")
+        );
+    }
+
+    #[test]
+    fn sv39_case_rejects_disabled_csr_comparison() {
+        let mut harness =
+            RisuHarness::from_targets(MockTarget::default(), MockTarget::default(), false).unwrap();
+        harness.set_step_check(true);
+
+        let case = RisuCase::generate(Suite::Sv39, 0x5000, 8).unwrap();
         let error = harness.run_case(&case).unwrap_err();
         assert!(
             error

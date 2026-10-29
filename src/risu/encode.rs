@@ -104,6 +104,29 @@ pub fn build_supervisor_trap_handler() -> Vec<u8> {
     build_recovery_handler(0x142, 0x141, 0x1020_0073)
 }
 
+/// Builds an S-mode page-fault recovery handler that also mixes `stval` into
+/// the signature. Page-fault trap values are exact virtual addresses, unlike
+/// the implementation-variable values produced by some other exceptions.
+pub fn build_supervisor_page_fault_handler() -> Vec<u8> {
+    let insns: &[u32] = &[
+        i_type(0x73, 6, 0b010, 0, 0x142),  // csrr t1, scause
+        i_type(0x13, 27, 0b001, 27, 7),    // slli s11, s11, 7
+        r_type(0x33, 27, 0b100, 27, 6, 0), // xor s11, s11, t1
+        i_type(0x73, 6, 0b010, 0, 0x141),  // csrr t1, sepc
+        r_type(0x33, 27, 0b100, 27, 6, 0), // xor s11, s11, t1
+        i_type(0x73, 5, 0b010, 0, 0x143),  // csrr t0, stval
+        r_type(0x33, 27, 0b100, 27, 5, 0), // xor s11, s11, t0
+        i_type(0x13, 6, 0b000, 6, 4),      // addi t1, t1, 4
+        i_type(0x73, 0, 0b001, 6, 0x141),  // csrw sepc, t1
+        0x1020_0073,                       // sret
+    ];
+    let mut bytes = Vec::with_capacity(insns.len() * 4);
+    for &word in insns {
+        bytes.extend_from_slice(&word.to_le_bytes());
+    }
+    bytes
+}
+
 fn build_recovery_handler(cause_csr: i32, epc_csr: i32, return_insn: u32) -> Vec<u8> {
     let insns: &[u32] = &[
         // csrr t1, {m,s}cause
@@ -194,5 +217,13 @@ mod tests {
         assert_eq!((supervisor[3] >> 20) & 0xfff, 0x141);
         assert_eq!((supervisor[6] >> 20) & 0xfff, 0x141);
         assert_eq!(supervisor[7], 0x1020_0073);
+
+        let paging = words(build_supervisor_page_fault_handler());
+        assert_eq!(paging.len(), 10);
+        assert_eq!((paging[0] >> 20) & 0xfff, 0x142);
+        assert_eq!((paging[3] >> 20) & 0xfff, 0x141);
+        assert_eq!((paging[5] >> 20) & 0xfff, 0x143);
+        assert_eq!((paging[8] >> 20) & 0xfff, 0x141);
+        assert_eq!(paging[9], 0x1020_0073);
     }
 }

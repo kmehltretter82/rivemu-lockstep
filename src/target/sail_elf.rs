@@ -16,7 +16,7 @@ const EM_RISCV: u16 = 243;
 const EF_RISCV_RVC: u32 = 0x0001;
 const EF_RISCV_FLOAT_ABI_DOUBLE: u32 = 0x0004;
 
-/// Guest addresses used to place the four RISU image fragments.
+/// Guest addresses used to place the RISU image fragments.
 ///
 /// `code_base` is the virtual/physical base of the sole `PT_LOAD` segment.
 /// `entry_addr` selects either generated code or a bootstrap as the ELF entry.
@@ -28,6 +28,7 @@ pub struct SailElfLayout {
     pub trap_addr: u64,
     pub bootstrap_addr: u64,
     pub scratch_addr: u64,
+    pub vm_setup_addr: u64,
 }
 
 /// Error returned when an image layout cannot be represented safely.
@@ -125,6 +126,7 @@ pub fn build_sail_elf(
     trap_handler: &[u8],
     bootstrap: &[u8],
     scratch: &[u8],
+    vm_setup: &[u8],
 ) -> Result<Vec<u8>, SailElfError> {
     if layout.code_base % LOAD_OFFSET != 0 {
         return Err(SailElfError::MisalignedCodeBase {
@@ -137,6 +139,7 @@ pub fn build_sail_elf(
         make_region("trap handler", layout.trap_addr, trap_handler)?,
         make_region("bootstrap", layout.bootstrap_addr, bootstrap)?,
         make_region("scratch", layout.scratch_addr, scratch)?,
+        make_region("VM setup", layout.vm_setup_addr, vm_setup)?,
     ];
 
     for region in regions.iter().filter(|region| !region.bytes.is_empty()) {
@@ -309,6 +312,7 @@ mod tests {
             bootstrap_addr: CODE_BASE + 0x1000,
             trap_addr: CODE_BASE + 0x2000,
             scratch_addr: CODE_BASE + 0x10_000,
+            vm_setup_addr: CODE_BASE + 0x11_000,
         }
     }
 
@@ -320,6 +324,7 @@ mod tests {
             &[0x73, 0, 0, 0],
             &[0x6f, 0, 0, 0],
             &[0xaa, 0xbb, 0xcc],
+            &[],
         )
         .unwrap();
 
@@ -359,13 +364,15 @@ mod tests {
         let trap = [6, 7, 8];
         let bootstrap = [9, 10, 11, 12];
         let scratch = [13, 14, 15, 16, 17, 18];
-        let elf = build_sail_elf(layout, &code, &trap, &bootstrap, &scratch).unwrap();
+        let vm_setup = [19, 20, 21, 22];
+        let elf = build_sail_elf(layout, &code, &trap, &bootstrap, &scratch, &vm_setup).unwrap();
 
         for (address, expected) in [
             (layout.code_addr, code.as_slice()),
             (layout.trap_addr, trap.as_slice()),
             (layout.bootstrap_addr, bootstrap.as_slice()),
             (layout.scratch_addr, scratch.as_slice()),
+            (layout.vm_setup_addr, vm_setup.as_slice()),
         ] {
             let offset = (LOAD_OFFSET + address - layout.code_base) as usize;
             assert_eq!(&elf[offset..offset + expected.len()], expected);
@@ -383,7 +390,7 @@ mod tests {
         let mut layout = fixture_layout();
         layout.entry_addr = layout.bootstrap_addr;
 
-        let elf = build_sail_elf(layout, &[1], &[2], &[3], &[4]).unwrap();
+        let elf = build_sail_elf(layout, &[1], &[2], &[3], &[4], &[]).unwrap();
         assert_eq!(u64_at(&elf, 24), layout.bootstrap_addr);
         assert_eq!(elf[LOAD_OFFSET as usize], 1);
         assert_eq!(elf[LOAD_OFFSET as usize + 0x1000], 3);
@@ -394,7 +401,7 @@ mod tests {
         let mut layout = fixture_layout();
         layout.bootstrap_addr = CODE_BASE + 2;
 
-        let error = build_sail_elf(layout, &[1, 2, 3, 4], &[5], &[6, 7], &[8])
+        let error = build_sail_elf(layout, &[1, 2, 3, 4], &[5], &[6, 7], &[8], &[])
             .expect_err("code and bootstrap overlap");
         assert_eq!(
             error,
@@ -410,7 +417,7 @@ mod tests {
         let mut layout = fixture_layout();
         layout.entry_addr += 4;
         assert_eq!(
-            build_sail_elf(layout, &[1], &[2], &[3], &[4]).unwrap_err(),
+            build_sail_elf(layout, &[1], &[2], &[3], &[4], &[]).unwrap_err(),
             SailElfError::EntryNotMapped {
                 entry: CODE_BASE + 4
             }
@@ -419,7 +426,7 @@ mod tests {
         layout.entry_addr = CODE_BASE;
         layout.scratch_addr = u64::MAX;
         assert_eq!(
-            build_sail_elf(layout, &[1], &[2], &[3], &[4]).unwrap_err(),
+            build_sail_elf(layout, &[1], &[2], &[3], &[4], &[]).unwrap_err(),
             SailElfError::RegionRangeOverflow {
                 region: "scratch",
                 address: u64::MAX,

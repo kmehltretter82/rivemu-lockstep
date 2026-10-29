@@ -249,6 +249,12 @@ pub trait CosimTarget {
         true
     }
 
+    /// Prepares target memory accesses for loading a fresh case. Targets whose
+    /// debugger packets are virtual may temporarily switch to M-mode/Bare.
+    fn prepare_case_memory(&mut self) -> Result<(), TargetError> {
+        Ok(())
+    }
+
     /// Writes `data` into guest physical memory at `gpa`.
     fn load_ram(&mut self, gpa: u64, data: &[u8]) -> Result<(), TargetError>;
     /// Reads guest physical memory at `gpa` into `buf`.

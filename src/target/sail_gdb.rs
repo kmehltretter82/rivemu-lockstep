@@ -16,6 +16,7 @@ use crate::risu::RisuCase;
 use crate::risu::Suite;
 use crate::risu::encode::build_trap_handler;
 use crate::risu::harness::{CODE_BASE, SCRATCH_BASE, TRAP_BASE};
+use crate::risu::sv39::VM_SETUP_BASE;
 use crate::target::sail_elf::{SailElfLayout, build_sail_elf};
 use crate::{ArchState, CosimTarget, StopReason, TargetError};
 
@@ -124,6 +125,7 @@ impl SailGdbTarget {
             trap_addr: TRAP_BASE,
             bootstrap_addr: SAIL_BOOTSTRAP_BASE,
             scratch_addr: SCRATCH_BASE,
+            vm_setup_addr: VM_SETUP_BASE,
         };
         let bootstrap_code = build_sail_bootstrap();
         let elf = build_sail_elf(
@@ -132,16 +134,17 @@ impl SailGdbTarget {
             &build_trap_handler(),
             &bootstrap_code,
             case.scratch(),
+            case.vm_setup(),
         )
         .map_err(|error| TargetError::Protocol(format!("cannot build Sail ELF: {error}")))?;
         let elf_path = write_temp_elf(case.seed(), &elf)?;
         let bootstrap_insns = u32::try_from(bootstrap_code.len() / 4)
             .expect("Sail bootstrap instruction count fits u32");
         let bootstrap = SailBootstrap::new(SAIL_BOOTSTRAP_BASE, bootstrap_insns, TRAP_BASE);
-        let spawn_result = if case.suite() == Suite::Privileged {
+        let spawn_result = if matches!(case.suite(), Suite::Privileged | Suite::Sv39) {
             // Model an implementation with no PMP entries so direct S/U-mode
-            // execution can reach the test RAM. Rivemu's bare lockstep target
-            // uses the corresponding non-strict PMP policy.
+            // execution and page-table walks can reach test RAM. Rivemu's bare
+            // lockstep target uses the corresponding non-strict PMP policy.
             const NO_PMP_CONFIG: &str = concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/configs/sail-lower-priv-no-pmp.json"

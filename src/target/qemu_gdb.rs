@@ -166,6 +166,14 @@ impl CosimTarget for QemuGdbTarget {
         true
     }
 
+    fn prepare_case_memory(&mut self) -> Result<(), TargetError> {
+        // QEMU GDB memory packets use the current virtual-memory context.
+        // Switch to M-mode/Bare before loading physical case images. Restoring
+        // a nonzero SATP later also guarantees a TLB flush between cases.
+        self.write_reg(PRIV_GDB_REG, 3)?;
+        self.write_csr(csr::SATP, 0)
+    }
+
     fn load_ram(&mut self, gpa: u64, data: &[u8]) -> Result<(), TargetError> {
         // Chunk writes into 2 KiB slices to stay well within GDB packet limits.
         for (i, chunk) in data.chunks(2048).enumerate() {

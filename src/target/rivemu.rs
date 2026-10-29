@@ -156,8 +156,12 @@ impl CosimTarget for RivemuTarget {
 
 #[cfg(test)]
 mod tests {
-    use crate::risu::encode::build_supervisor_trap_handler;
-    use crate::risu::harness::{CODE_BASE, S_TRAP_BASE};
+    use rivemu_cpu_riscv::decode;
+
+    use crate::risu::encode::{build_supervisor_page_fault_handler, build_supervisor_trap_handler};
+    use crate::risu::harness::{CODE_BASE, S_TRAP_BASE, SCRATCH_BASE, SV39_TRAP_BASE};
+    use crate::risu::sv39::VM_SETUP_BASE;
+    use crate::risu::{RisuCase, Suite};
 
     use super::*;
 
@@ -197,6 +201,64 @@ mod tests {
             assert_eq!(returned.pc, CODE_BASE + 4);
             assert_eq!(returned.prv, origin);
             assert_eq!(returned.sepc, CODE_BASE + 4);
+        }
+    }
+
+    #[test]
+    fn sv39_permission_faults_report_and_return_through_supervisor() {
+        const MSTATUS_SPP: u64 = 1 << 8;
+
+        let mut target = RivemuTarget::new_bare(false).unwrap();
+        target
+            .load_ram(SV39_TRAP_BASE, &build_supervisor_page_fault_handler())
+            .unwrap();
+
+        for (seed, expected_cause, origin) in [
+            (0x5002, 13u64, 1u8),
+            (0x5004, 13u64, 1u8),
+            (0x5006, 13u64, 0u8),
+            (0x5007, 15u64, 1u8),
+        ] {
+            let case = RisuCase::generate(Suite::Sv39, seed, 4).unwrap();
+            target.load_ram(CODE_BASE, case.code_bytes()).unwrap();
+            target.load_ram(SCRATCH_BASE, case.scratch()).unwrap();
+            target.load_ram(VM_SETUP_BASE, case.vm_setup()).unwrap();
+            target.set_state(case.init_state()).unwrap();
+
+            let raw = u32::from_le_bytes(case.code_bytes()[..4].try_into().unwrap());
+            let insn = decode::decode(raw);
+            let fault_address =
+                case.init_state().x[insn.rs1 as usize].wrapping_add(insn.imm as i64 as u64);
+
+            target.step_one().unwrap();
+            let trapped = target.get_state().unwrap();
+            assert_eq!(trapped.pc, SV39_TRAP_BASE);
+            assert_eq!(trapped.prv, 1);
+            assert_eq!(trapped.scause, expected_cause);
+            assert_eq!(trapped.sepc, CODE_BASE);
+            assert_eq!(trapped.stval, fault_address);
+            assert_eq!(trapped.mstatus & MSTATUS_SPP != 0, origin == 1);
+
+            for _ in 0..10 {
+                target.step_one().unwrap();
+            }
+            let returned = target.get_state().unwrap();
+            assert_eq!(returned.pc, CODE_BASE + 4);
+            assert_eq!(returned.prv, origin);
+        }
+
+        for seed in [0x5003, 0x5005] {
+            let case = RisuCase::generate(Suite::Sv39, seed, 1).unwrap();
+            target.load_ram(CODE_BASE, case.code_bytes()).unwrap();
+            target.load_ram(SCRATCH_BASE, case.scratch()).unwrap();
+            target.load_ram(VM_SETUP_BASE, case.vm_setup()).unwrap();
+            target.set_state(case.init_state()).unwrap();
+
+            target.step_one().unwrap();
+            let state = target.get_state().unwrap();
+            assert_eq!(state.pc, CODE_BASE + 4);
+            assert_eq!(state.prv, 1);
+            assert_eq!(state.scause, 0);
         }
     }
 }

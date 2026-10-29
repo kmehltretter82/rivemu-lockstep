@@ -27,12 +27,14 @@ pub enum Suite {
     CsrTrap,
     /// Lower-privilege execution, exception entry, and M-mode trap return semantics.
     Privileged,
+    /// Sv39 translation, page permissions, and delegated page-fault recovery.
+    Sv39,
     /// Directed RV64A AMO and LR/SC semantics over sandboxed scratch memory.
     Atomics,
     /// Legal, sequential RV64C integer and scratch-memory operations.
     Compressed,
     /// Original mixed suites, excluding specialized [`Self::Atomics`], [`Self::FpEdges`],
-    /// and [`Self::Compressed`] suites.
+    /// [`Self::Privileged`], [`Self::Sv39`], and [`Self::Compressed`] suites.
     All,
 }
 
@@ -50,6 +52,7 @@ impl Suite {
             "mem" | "amo" | "sandboxmem" => Some(Self::SandboxMem),
             "csr" | "trap" | "csrtrap" => Some(Self::CsrTrap),
             "priv" | "privileged" | "lower-priv" => Some(Self::Privileged),
+            "sv39" | "paging" | "vm" => Some(Self::Sv39),
             "atomic" | "atomics" | "rv64a" | "lrsc" => Some(Self::Atomics),
             "compressed" | "rvc" | "c" => Some(Self::Compressed),
             "all" => Some(Self::All),
@@ -70,6 +73,7 @@ impl Suite {
             Self::SandboxMem => "sandbox-mem-amo",
             Self::CsrTrap => "csr-trap",
             Self::Privileged => "privileged-traps",
+            Self::Sv39 => "sv39-paging",
             Self::Atomics => "rv64a-directed",
             Self::Compressed => "rv64c",
             Self::All => "all",
@@ -127,6 +131,7 @@ pub fn generate_block(rng: &mut Rng, suite: Suite, num_insns: usize) -> Vec<u32>
                 out.push(gen_privileged_case(privileged_selector, rng));
                 privileged_selector = (privileged_selector + 1) % PRIVILEGED_CASES;
             }
+            Suite::Sv39 => unreachable!("Sv39 instructions use sv39::generate_block"),
             Suite::Atomics => {
                 gen_atomic_case(atomic_selector, atomic_slot, &mut out);
                 atomic_slot += 1;
@@ -988,6 +993,14 @@ mod tests {
         assert_eq!(Suite::parse("privileged"), Some(Suite::Privileged));
         assert_eq!(Suite::parse("lower-priv"), Some(Suite::Privileged));
         assert_eq!(Suite::Privileged.name(), "privileged-traps");
+    }
+
+    #[test]
+    fn sv39_suite_names_parse() {
+        assert_eq!(Suite::parse("sv39"), Some(Suite::Sv39));
+        assert_eq!(Suite::parse("paging"), Some(Suite::Sv39));
+        assert_eq!(Suite::parse("vm"), Some(Suite::Sv39));
+        assert_eq!(Suite::Sv39.name(), "sv39-paging");
     }
 
     #[test]
