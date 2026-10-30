@@ -961,14 +961,20 @@ mod tests {
             assert_eq!(case.end_pc(), CODE_BASE + 32 * 4);
         }
 
-        let remap = RisuCase::generate(Suite::Sv39, 0x5008, 32).unwrap();
-        assert_eq!(
-            u64::from_le_bytes(remap.scratch()[..8].try_into().unwrap()),
-            sv39::OLD_SENTINEL
-        );
-        assert_eq!(remap.init_state().x[5], sv39::PROBE_PTE_ADDR);
-        assert_eq!(remap.init_state().x[6], sv39::ALT_PAGE_BASE);
-        assert_eq!(remap.init_state().x[7], sv39::REPLACEMENT_PTE);
+        for seed in 0x5008..=0x500b {
+            let remap = RisuCase::generate(Suite::Sv39, seed, 32).unwrap();
+            assert_eq!(
+                u64::from_le_bytes(remap.scratch()[..8].try_into().unwrap()),
+                sv39::OLD_SENTINEL
+            );
+            assert_eq!(remap.init_state().x[5], sv39::PROBE_PTE_ADDR);
+            assert_eq!(remap.init_state().x[6], sv39::ALT_PAGE_BASE);
+            assert_eq!(remap.init_state().x[7], sv39::REPLACEMENT_PTE);
+            if seed >= 0x500a {
+                assert_eq!(remap.init_state().satp, sv39::SATP_SV39_REMAP_ASID);
+                assert_eq!(remap.init_state().x[13], sv39::REMAP_ASID);
+            }
+        }
     }
 
     #[test]
