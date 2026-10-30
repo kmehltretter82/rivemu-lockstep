@@ -160,7 +160,10 @@ mod tests {
 
     use crate::risu::encode::{build_supervisor_page_fault_handler, build_supervisor_trap_handler};
     use crate::risu::harness::{CODE_BASE, S_TRAP_BASE, SCRATCH_BASE, SV39_TRAP_BASE};
-    use crate::risu::sv39::VM_SETUP_BASE;
+    use crate::risu::sv39::{
+        ALT_SENTINEL, INITIAL_PROBE_PTE, OLD_SENTINEL, PROBE_PTE_ADDR, REPLACEMENT_PTE,
+        VM_SETUP_BASE,
+    };
     use crate::risu::{RisuCase, Suite};
 
     use super::*;
@@ -260,5 +263,40 @@ mod tests {
             assert_eq!(state.prv, 1);
             assert_eq!(state.scause, 0);
         }
+    }
+
+    #[test]
+    fn sv39_global_sfence_observes_guest_pte_rewrite() {
+        let case = RisuCase::generate(Suite::Sv39, 0x5008, 8).unwrap();
+        let mut target = RivemuTarget::new_bare(false).unwrap();
+        target.load_ram(CODE_BASE, case.code_bytes()).unwrap();
+        target.load_ram(SCRATCH_BASE, case.scratch()).unwrap();
+        target.load_ram(VM_SETUP_BASE, case.vm_setup()).unwrap();
+        target.set_state(case.init_state()).unwrap();
+
+        let mut pte = [0; 8];
+        target.read_ram(PROBE_PTE_ADDR, &mut pte).unwrap();
+        assert_eq!(u64::from_le_bytes(pte), INITIAL_PROBE_PTE);
+
+        target.step_one().unwrap(); // alternate-page load
+        assert_eq!(target.get_state().unwrap().x[10], ALT_SENTINEL);
+        target.step_one().unwrap(); // PTE-page translation prewarm
+        target.step_one().unwrap(); // probe translation warmup
+        assert_eq!(target.get_state().unwrap().x[9], OLD_SENTINEL);
+        target.step_one().unwrap(); // fence rw, rw
+
+        target.read_ram(PROBE_PTE_ADDR, &mut pte).unwrap();
+        assert_eq!(u64::from_le_bytes(pte), INITIAL_PROBE_PTE);
+        target.step_one().unwrap(); // guest leaf-PTE replacement
+        target.read_ram(PROBE_PTE_ADDR, &mut pte).unwrap();
+        assert_eq!(u64::from_le_bytes(pte), REPLACEMENT_PTE);
+
+        target.step_one().unwrap(); // sfence.vma x0, x0
+        target.step_one().unwrap(); // post-fence probe load
+        assert_eq!(target.get_state().unwrap().x[11], ALT_SENTINEL);
+        target.step_one().unwrap(); // equality witness
+        let final_state = target.get_state().unwrap();
+        assert_eq!(final_state.x[12], 0);
+        assert_eq!(final_state.pc, case.end_pc());
     }
 }

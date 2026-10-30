@@ -1,7 +1,7 @@
 //! Deterministic Sv39 page tables and translated load/store blocks.
 
 use crate::ArchState;
-use crate::risu::encode::{EBREAK, i_type, s_type};
+use crate::risu::encode::{EBREAK, NOP, i_type, s_type};
 use crate::risu::harness::{CODE_BASE, SCRATCH_BASE, SV39_TRAP_BASE};
 use crate::risu::seed::Rng;
 
@@ -34,6 +34,25 @@ pub const PROBE_VA: u64 = VM_SETUP_BASE + VM_SETUP_LEN as u64;
 
 const SATP_SV39: u64 = (8u64 << 60) | (ROOT_PAGE_BASE >> 12);
 const PAGE_FAULT_DELEGATION: u64 = (1 << 12) | (1 << 13) | (1 << 15);
+const REMAP_FLAGS: u64 = PTE_V | PTE_R | PTE_W | PTE_A | PTE_D;
+
+pub(crate) const OLD_SENTINEL: u64 = 0x5a5a_0000_0000_0000;
+pub(crate) const ALT_SENTINEL: u64 = 0xa5a5_0000_0000_0000;
+pub(crate) const PROBE_PTE_ADDR: u64 = L0_PAGE_BASE + vpn_index(PROBE_VA, 0) as u64 * 8;
+#[cfg(test)]
+pub(crate) const INITIAL_PROBE_PTE: u64 = leaf_pte(SCRATCH_BASE, REMAP_FLAGS);
+pub(crate) const REPLACEMENT_PTE: u64 = leaf_pte(ALT_PAGE_BASE, REMAP_FLAGS);
+
+const GLOBAL_SFENCE_REMAP: [u32; 8] = [
+    0x0003_3503, // ld x10, 0(x6): read the alternate sentinel
+    0x0002_b003, // ld x0, 0(x5): prewarm the PTE-page translation
+    0x0004_3483, // ld x9, 0(x8): warm the probe translation
+    0x0330_000f, // fence rw, rw
+    0x0072_b023, // sd x7, 0(x5): replace the probe leaf PTE
+    0x1200_0073, // sfence.vma x0, x0
+    0x0004_3583, // ld x11, 0(x8): observe the replacement mapping
+    0x00b5_4633, // xor x12, x10, x11: zero equality witness
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Case {
@@ -45,10 +64,14 @@ enum Case {
     SupervisorExecuteOnlyMxrOn,
     UserSupervisorPage,
     SupervisorReadOnlyStore,
+    GlobalSfenceRemap,
 }
 
 impl Case {
     const fn from_seed(seed: u64) -> Self {
+        if seed & 0xf == 8 {
+            return Self::GlobalSfenceRemap;
+        }
         match seed & 7 {
             0 => Self::Supervisor,
             1 => Self::User,
@@ -98,13 +121,34 @@ pub fn configure_case(seed: u64, state: &mut ArchState) -> Vec<u8> {
         state.mstatus |= MSTATUS_MXR;
         state.sstatus |= MSTATUS_MXR;
     }
+    if case == Case::GlobalSfenceRemap {
+        state.x[5] = PROBE_PTE_ADDR;
+        state.x[6] = ALT_PAGE_BASE;
+        state.x[7] = REPLACEMENT_PTE;
+    }
 
     build_setup_image(case)
+}
+
+/// Fixes the remap case's old-page sentinel so a stale translation is observable.
+pub(crate) fn configure_scratch(seed: u64, scratch: &mut [u8]) {
+    if Case::from_seed(seed) == Case::GlobalSfenceRemap {
+        scratch[..8].copy_from_slice(&OLD_SENTINEL.to_le_bytes());
+    }
 }
 
 /// Generates an exact-length translated-memory block followed by `EBREAK`.
 pub fn generate_block(rng: &mut Rng, seed: u64, num_insns: usize) -> Vec<u32> {
     let case = Case::from_seed(seed);
+    if case == Case::GlobalSfenceRemap {
+        let mut out = Vec::with_capacity(num_insns + 1);
+        if num_insns >= GLOBAL_SFENCE_REMAP.len() {
+            out.extend_from_slice(&GLOBAL_SFENCE_REMAP);
+        }
+        out.resize(num_insns, NOP);
+        out.push(EBREAK);
+        return out;
+    }
     let mut out = Vec::with_capacity(num_insns + 1);
     while out.len() < num_insns {
         let slot = out.len();
@@ -132,7 +176,7 @@ pub fn generate_block(rng: &mut Rng, seed: u64, num_insns: usize) -> Vec<u32> {
 fn build_setup_image(case: Case) -> Vec<u8> {
     let mut image = vec![0u8; VM_SETUP_LEN];
     for (index, chunk) in image[..PAGE_SIZE].chunks_exact_mut(8).enumerate() {
-        let sentinel = 0xa5a5_0000_0000_0000u64 ^ index as u64;
+        let sentinel = ALT_SENTINEL ^ index as u64;
         chunk.copy_from_slice(&sentinel.to_le_bytes());
     }
 
@@ -161,6 +205,7 @@ fn build_setup_image(case: Case) -> Vec<u8> {
             PTE_V | PTE_X | PTE_A | PTE_D
         }
         Case::SupervisorReadOnlyStore => PTE_V | PTE_R | PTE_A | PTE_D,
+        Case::GlobalSfenceRemap => REMAP_FLAGS,
         _ => PTE_V | PTE_R | PTE_W | PTE_A | PTE_D,
     };
 
@@ -288,6 +333,58 @@ mod tests {
             );
             assert_eq!(scratch & PTE_W == 0 && scratch & PTE_R != 0, seed == 7);
         }
+    }
+
+    #[test]
+    fn global_sfence_case_has_exact_remap_state_and_sentinels() {
+        let mut state = ArchState::default();
+        let image = configure_case(0x5008, &mut state);
+
+        assert_eq!(PROBE_PTE_ADDR, 0x8001_40a8);
+        assert_eq!(INITIAL_PROBE_PTE, 0x2000_40c7);
+        assert_eq!(REPLACEMENT_PTE, 0x2000_44c7);
+        assert_eq!(state.prv, 1);
+        assert_eq!(state.x[5], PROBE_PTE_ADDR);
+        assert_eq!(state.x[6], ALT_PAGE_BASE);
+        assert_eq!(state.x[7], REPLACEMENT_PTE);
+        assert_eq!(state.x[8], PROBE_VA);
+        assert_eq!(
+            read_pte(&image, L0_PAGE_BASE, PROBE_VA, 0),
+            INITIAL_PROBE_PTE
+        );
+        assert_eq!(
+            u64::from_le_bytes(image[..8].try_into().unwrap()),
+            ALT_SENTINEL
+        );
+
+        let mut scratch = vec![0xff; 16];
+        configure_scratch(0x5008, &mut scratch);
+        assert_eq!(
+            u64::from_le_bytes(scratch[..8].try_into().unwrap()),
+            OLD_SENTINEL
+        );
+        assert_eq!(&scratch[8..], &[0xff; 8]);
+    }
+
+    #[test]
+    fn global_sfence_block_is_exact_and_never_emits_a_partial_remap() {
+        let mut rng = Rng::new(0x5008);
+        let exact = generate_block(&mut rng, 0x5008, GLOBAL_SFENCE_REMAP.len());
+        assert_eq!(&exact[..GLOBAL_SFENCE_REMAP.len()], &GLOBAL_SFENCE_REMAP);
+        assert_eq!(exact.last(), Some(&EBREAK));
+
+        let padded = generate_block(&mut rng, 0x5008, GLOBAL_SFENCE_REMAP.len() + 4);
+        assert_eq!(&padded[..GLOBAL_SFENCE_REMAP.len()], &GLOBAL_SFENCE_REMAP);
+        assert!(
+            padded[GLOBAL_SFENCE_REMAP.len()..padded.len() - 1]
+                .iter()
+                .all(|&word| word == NOP)
+        );
+        assert_eq!(padded.last(), Some(&EBREAK));
+
+        let short = generate_block(&mut rng, 0x5008, GLOBAL_SFENCE_REMAP.len() - 1);
+        assert!(short[..short.len() - 1].iter().all(|&word| word == NOP));
+        assert_eq!(short.last(), Some(&EBREAK));
     }
 
     #[test]

@@ -124,6 +124,9 @@ impl RisuCase {
         for chunk in scratch.chunks_exact_mut(8) {
             chunk.copy_from_slice(&rng.edge_u64().to_le_bytes());
         }
+        if suite == Suite::Sv39 {
+            sv39::configure_scratch(seed, &mut scratch);
+        }
 
         let end_pc = CODE_BASE
             .checked_add((code_bytes.len() - 4) as u64)
@@ -947,7 +950,7 @@ mod tests {
 
     #[test]
     fn sv39_cases_materialize_page_tables_and_probe_alias() {
-        for seed in 0..8 {
+        for seed in 0..16 {
             let case = RisuCase::generate(Suite::Sv39, 0x5000 + seed, 32).unwrap();
             assert!(case.uses_scratch());
             assert_eq!(case.vm_setup().len(), sv39::VM_SETUP_LEN);
@@ -957,6 +960,15 @@ mod tests {
             assert_eq!(case.code_bytes().len(), 33 * 4);
             assert_eq!(case.end_pc(), CODE_BASE + 32 * 4);
         }
+
+        let remap = RisuCase::generate(Suite::Sv39, 0x5008, 32).unwrap();
+        assert_eq!(
+            u64::from_le_bytes(remap.scratch()[..8].try_into().unwrap()),
+            sv39::OLD_SENTINEL
+        );
+        assert_eq!(remap.init_state().x[5], sv39::PROBE_PTE_ADDR);
+        assert_eq!(remap.init_state().x[6], sv39::ALT_PAGE_BASE);
+        assert_eq!(remap.init_state().x[7], sv39::REPLACEMENT_PTE);
     }
 
     #[test]
