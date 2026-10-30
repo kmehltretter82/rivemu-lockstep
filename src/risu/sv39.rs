@@ -42,6 +42,12 @@ pub(crate) const INSN_FAULT_VA: u64 = EXEC_ALIAS_VA - 4;
 pub const SUPERPAGE_BASE_VA: u64 = CODE_BASE + 0x0020_0000;
 /// Superpage virtual alias whose `vpn[0]` selects `SCRATCH_BASE` inside `CODE_BASE..+2 MiB`.
 pub const SUPERPAGE_PROBE_VA: u64 = SUPERPAGE_BASE_VA + (SCRATCH_BASE - CODE_BASE);
+/// Virtual alias mapped to a reserved `R=0, W=1` level-0 PTE.
+pub const RESERVED_RW_VA: u64 = EXEC_ALIAS_VA + PAGE_SIZE as u64;
+/// Virtual alias mapped through a level-1 non-leaf PTE with reserved `PTE_U = 1`.
+pub const NONLEAF_ADU_VA: u64 = CODE_BASE + 0x0040_0000;
+/// Non-canonical Sv39 virtual address (`va[38] = 1`, `va[63:39] = 0`).
+pub const NONCANONICAL_SV39_VA: u64 = 1u64 << 38;
 
 const SATP_SV39: u64 = (8u64 << 60) | (ROOT_PAGE_BASE >> 12);
 pub(crate) const REMAP_ASID: u64 = 1;
@@ -57,6 +63,8 @@ pub(crate) const INITIAL_PROBE_PTE: u64 = leaf_pte(SCRATCH_BASE, REMAP_FLAGS);
 pub(crate) const REPLACEMENT_PTE: u64 = leaf_pte(ALT_PAGE_BASE, REMAP_FLAGS);
 pub(crate) const VALID_SUPERPAGE_PTE: u64 = leaf_pte(CODE_BASE, REMAP_FLAGS);
 pub(crate) const MISALIGNED_SUPERPAGE_PTE: u64 = leaf_pte(SCRATCH_BASE, REMAP_FLAGS);
+pub(crate) const RESERVED_RW_PTE: u64 = leaf_pte(SCRATCH_BASE, PTE_V | PTE_W | PTE_A | PTE_D);
+pub(crate) const NONLEAF_ADU_PTE: u64 = pointer_pte(L0_PAGE_BASE) | PTE_U;
 pub(crate) const USER_EXEC_PROBE_PTE: u64 = leaf_pte(
     SCRATCH_BASE,
     PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D,
@@ -218,6 +226,11 @@ pub fn configure_case(seed: u64, state: &mut ArchState) -> Vec<u8> {
             state.x[13] = REMAP_ASID;
         }
     }
+    if case == Case::MisalignedSuperpageFault {
+        state.x[9] = RESERVED_RW_VA;
+        state.x[10] = NONLEAF_ADU_VA;
+        state.x[11] = NONCANONICAL_SV39_VA;
+    }
     if case == Case::InstructionPageFault {
         state.x[9] = EXEC_ALIAS_VA;
         state.x[13] = PROBE_PTE_ADDR;
@@ -260,18 +273,23 @@ pub fn generate_block(rng: &mut Rng, seed: u64, num_insns: usize) -> Vec<u32> {
     while out.len() < num_insns {
         let slot = out.len();
         let offset = ((rng.next_u64() % 256) * 8) as i32;
+        let base_reg = if case == Case::MisalignedSuperpageFault {
+            8 + ((slot >> 2) & 3) as u8
+        } else {
+            8
+        };
         let word = if case.loads_only() {
             let funct3 = if slot & 1 == 0 { 0b011 } else { 0b010 }; // LD / LW
-            i_type(0x03, rng.pick_gpr(), funct3, 8, offset)
+            i_type(0x03, rng.pick_gpr(), funct3, base_reg, offset)
         } else if case.stores_only() {
             let funct3 = if slot & 1 == 0 { 0b011 } else { 0b010 }; // SD / SW
-            s_type(0x23, funct3, 8, rng.pick_gpr(), offset)
+            s_type(0x23, funct3, base_reg, rng.pick_gpr(), offset)
         } else {
             match slot & 3 {
-                0 => i_type(0x03, rng.pick_gpr(), 0b011, 8, offset), // LD
-                1 => s_type(0x23, 0b011, 8, rng.pick_gpr(), offset), // SD
-                2 => i_type(0x03, rng.pick_gpr(), 0b010, 8, offset), // LW
-                _ => s_type(0x23, 0b010, 8, rng.pick_gpr(), offset), // SW
+                0 => i_type(0x03, rng.pick_gpr(), 0b011, base_reg, offset), // LD
+                1 => s_type(0x23, 0b011, base_reg, rng.pick_gpr(), offset), // SD
+                2 => i_type(0x03, rng.pick_gpr(), 0b010, base_reg, offset), // LW
+                _ => s_type(0x23, 0b010, base_reg, rng.pick_gpr(), offset), // SW
             }
         };
         out.push(word);
@@ -315,6 +333,18 @@ fn build_setup_image(case: Case) -> Vec<u8> {
             L1_PAGE_BASE,
             vpn_index(SUPERPAGE_PROBE_VA, 1),
             MISALIGNED_SUPERPAGE_PTE,
+        );
+        put_pte(
+            &mut image,
+            L1_PAGE_BASE,
+            vpn_index(NONLEAF_ADU_VA, 1),
+            NONLEAF_ADU_PTE,
+        );
+        put_pte(
+            &mut image,
+            L0_PAGE_BASE,
+            vpn_index(RESERVED_RW_VA, 0),
+            RESERVED_RW_PTE,
         );
     }
 
@@ -567,9 +597,20 @@ mod tests {
         let misaligned_image = configure_case(0x500d, &mut misaligned_state);
         assert_eq!(misaligned_state.prv, 1);
         assert_eq!(misaligned_state.x[8], SUPERPAGE_PROBE_VA);
+        assert_eq!(misaligned_state.x[9], RESERVED_RW_VA);
+        assert_eq!(misaligned_state.x[10], NONLEAF_ADU_VA);
+        assert_eq!(misaligned_state.x[11], NONCANONICAL_SV39_VA);
         assert_eq!(
             read_pte(&misaligned_image, L1_PAGE_BASE, SUPERPAGE_PROBE_VA, 1),
             MISALIGNED_SUPERPAGE_PTE
+        );
+        assert_eq!(
+            read_pte(&misaligned_image, L1_PAGE_BASE, NONLEAF_ADU_VA, 1),
+            NONLEAF_ADU_PTE
+        );
+        assert_eq!(
+            read_pte(&misaligned_image, L0_PAGE_BASE, RESERVED_RW_VA, 0),
+            RESERVED_RW_PTE
         );
         assert_ne!((MISALIGNED_SUPERPAGE_PTE >> 10) & 0x1ff, 0);
 

@@ -323,23 +323,42 @@ mod tests {
         assert_eq!(reason, StopReason::Breakpoint);
         assert_eq!(target.get_state().unwrap().scause, 0);
 
-        // 0x500d: misaligned 2 MiB superpage faults on the first load with scause = 13.
-        let misaligned = RisuCase::generate(Suite::Sv39, 0x500d, 1).unwrap();
+        // 0x500d: misaligned superpage, reserved R=0/W=1 PTE, non-leaf PTE with U=1,
+        // and non-canonical Sv39 VAs all fault with exact stval and return via SV39_TRAP_BASE.
+        let misaligned = RisuCase::generate(Suite::Sv39, 0x500d, 16).unwrap();
         target.load_ram(CODE_BASE, misaligned.code_bytes()).unwrap();
         target.load_ram(SCRATCH_BASE, misaligned.scratch()).unwrap();
         target
             .load_ram(VM_SETUP_BASE, misaligned.vm_setup())
             .unwrap();
         target.set_state(misaligned.init_state()).unwrap();
-        let raw = u32::from_le_bytes(misaligned.code_bytes()[..4].try_into().unwrap());
-        let insn = decode::decode(raw);
-        let expected_tval =
-            misaligned.init_state().x[insn.rs1 as usize].wrapping_add(insn.imm as i64 as u64);
-        target.step_one().unwrap();
-        let trapped = target.get_state().unwrap();
-        assert_eq!(trapped.pc, SV39_TRAP_BASE);
-        assert_eq!(trapped.scause, 13);
-        assert_eq!(trapped.stval, expected_tval);
+        for slot in 0..16usize {
+            let state_before = target.get_state().unwrap();
+            let raw = u32::from_le_bytes(
+                misaligned.code_bytes()[slot * 4..(slot + 1) * 4]
+                    .try_into()
+                    .unwrap(),
+            );
+            let insn = decode::decode(raw);
+            let expected_base_reg = 8 + ((slot >> 2) & 3) as u8;
+            assert_eq!(insn.rs1, expected_base_reg);
+            let expected_tval =
+                state_before.x[insn.rs1 as usize].wrapping_add(insn.imm as i64 as u64);
+            let expected_cause = if slot & 1 == 0 { 13 } else { 15 };
+
+            target.step_one().unwrap();
+            let trapped = target.get_state().unwrap();
+            assert_eq!(trapped.pc, SV39_TRAP_BASE);
+            assert_eq!(trapped.scause, expected_cause);
+            assert_eq!(trapped.stval, expected_tval);
+            for _ in 0..10 {
+                target.step_one().unwrap();
+            }
+            assert_eq!(
+                target.get_state().unwrap().pc,
+                CODE_BASE + ((slot + 1) * 4) as u64
+            );
+        }
 
         // 0x500e: instruction page fault (scause = 12) on PTE_X=0 and on U+X page in S-mode.
         let fetch_fault = RisuCase::generate(Suite::Sv39, 0x500e, 6).unwrap();
