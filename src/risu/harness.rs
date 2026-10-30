@@ -954,7 +954,12 @@ mod tests {
             let case = RisuCase::generate(Suite::Sv39, 0x5000 + seed, 32).unwrap();
             assert!(case.uses_scratch());
             assert_eq!(case.vm_setup().len(), sv39::VM_SETUP_LEN);
-            assert_eq!(case.init_state().x[8], sv39::PROBE_VA);
+            let expected_probe = if matches!(seed, 12 | 13) {
+                sv39::SUPERPAGE_PROBE_VA
+            } else {
+                sv39::PROBE_VA
+            };
+            assert_eq!(case.init_state().x[8], expected_probe);
             assert_eq!(case.init_state().satp >> 60, 8);
             assert_eq!(case.init_state().stvec, SV39_TRAP_BASE);
             assert_eq!(case.code_bytes().len(), 33 * 4);

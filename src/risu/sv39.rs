@@ -14,6 +14,9 @@ const PTE_U: u64 = 1 << 4;
 const PTE_A: u64 = 1 << 6;
 const PTE_D: u64 = 1 << 7;
 
+const MSTATUS_MPP_MASK: u64 = 3 << 11;
+const MSTATUS_MPP_SUPERVISOR: u64 = 1 << 11;
+const MSTATUS_MPRV: u64 = 1 << 17;
 const MSTATUS_SUM: u64 = 1 << 18;
 const MSTATUS_MXR: u64 = 1 << 19;
 
@@ -31,6 +34,14 @@ pub const VM_SETUP_BASE: u64 = ALT_PAGE_BASE;
 pub const VM_SETUP_LEN: usize = PAGE_SIZE * 4;
 /// Guest virtual alias used for permission probes over the physical scratch page.
 pub const PROBE_VA: u64 = VM_SETUP_BASE + VM_SETUP_LEN as u64;
+/// Executable virtual alias immediately above `PROBE_VA` used for fetch-fault recovery.
+pub const EXEC_ALIAS_VA: u64 = PROBE_VA + PAGE_SIZE as u64;
+#[cfg(test)]
+pub(crate) const INSN_FAULT_VA: u64 = EXEC_ALIAS_VA - 4;
+/// Base of the 2 MiB level-1 superpage window (`vpn[2] = 2, vpn[1] = 1`).
+pub const SUPERPAGE_BASE_VA: u64 = CODE_BASE + 0x0020_0000;
+/// Superpage virtual alias whose `vpn[0]` selects `SCRATCH_BASE` inside `CODE_BASE..+2 MiB`.
+pub const SUPERPAGE_PROBE_VA: u64 = SUPERPAGE_BASE_VA + (SCRATCH_BASE - CODE_BASE);
 
 const SATP_SV39: u64 = (8u64 << 60) | (ROOT_PAGE_BASE >> 12);
 pub(crate) const REMAP_ASID: u64 = 1;
@@ -44,8 +55,23 @@ pub(crate) const PROBE_PTE_ADDR: u64 = L0_PAGE_BASE + vpn_index(PROBE_VA, 0) as 
 #[cfg(test)]
 pub(crate) const INITIAL_PROBE_PTE: u64 = leaf_pte(SCRATCH_BASE, REMAP_FLAGS);
 pub(crate) const REPLACEMENT_PTE: u64 = leaf_pte(ALT_PAGE_BASE, REMAP_FLAGS);
+pub(crate) const VALID_SUPERPAGE_PTE: u64 = leaf_pte(CODE_BASE, REMAP_FLAGS);
+pub(crate) const MISALIGNED_SUPERPAGE_PTE: u64 = leaf_pte(SCRATCH_BASE, REMAP_FLAGS);
+pub(crate) const USER_EXEC_PROBE_PTE: u64 = leaf_pte(
+    SCRATCH_BASE,
+    PTE_V | PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D,
+);
+pub(crate) const RET_INSN: u32 = i_type(0x67, 0, 0, 1, 0);
 
 const REMAP_INSN_LEN: usize = 8;
+const INSN_PAGE_FAULT_SEQUENCE: [u32; 6] = [
+    i_type(0x67, 1, 0, 9, -4),      // jalr x1, x9, -4: fault at INSN_FAULT_VA (PTE_X = 0)
+    i_type(0x03, 0, 0b011, 13, 0),  // ld x0, 0(x13): prewarm PTE-page translation
+    s_type(0x23, 0b011, 13, 14, 0), // sd x14, 0(x13): rewrite PROBE_VA to U+X leaf PTE
+    r_type(0x73, 0, 0, 8, 0, 0x09), // sfence.vma x8, x0
+    i_type(0x03, 10, 0b011, 8, 0),  // ld x10, 0(x8): S-mode SUM=1 data load succeeds on U page
+    i_type(0x67, 1, 0, 9, -4),      // jalr x1, x9, -4: fault at INSN_FAULT_VA (U page in S-mode)
+];
 
 const fn sfence_remap_sequence(rs1: u8, rs2: u8) -> [u32; REMAP_INSN_LEN] {
     [
@@ -74,18 +100,15 @@ enum Case {
     AddressSfenceRemap,
     AsidSfenceRemap,
     AddressAsidSfenceRemap,
+    Superpage2Mib,
+    MisalignedSuperpageFault,
+    InstructionPageFault,
+    MachineMprvSv39,
 }
 
 impl Case {
     const fn from_seed(seed: u64) -> Self {
         match seed & 0xf {
-            8 => return Self::GlobalSfenceRemap,
-            9 => return Self::AddressSfenceRemap,
-            10 => return Self::AsidSfenceRemap,
-            11 => return Self::AddressAsidSfenceRemap,
-            _ => {}
-        }
-        match seed & 7 {
             0 => Self::Supervisor,
             1 => Self::User,
             2 => Self::SupervisorUserSumOff,
@@ -93,7 +116,15 @@ impl Case {
             4 => Self::SupervisorExecuteOnlyMxrOff,
             5 => Self::SupervisorExecuteOnlyMxrOn,
             6 => Self::UserSupervisorPage,
-            _ => Self::SupervisorReadOnlyStore,
+            7 => Self::SupervisorReadOnlyStore,
+            8 => Self::GlobalSfenceRemap,
+            9 => Self::AddressSfenceRemap,
+            10 => Self::AsidSfenceRemap,
+            11 => Self::AddressAsidSfenceRemap,
+            12 => Self::Superpage2Mib,
+            13 => Self::MisalignedSuperpageFault,
+            14 => Self::InstructionPageFault,
+            _ => Self::MachineMprvSv39,
         }
     }
 
@@ -115,6 +146,18 @@ impl Case {
         matches!(self, Self::AsidSfenceRemap | Self::AddressAsidSfenceRemap)
     }
 
+    const fn uses_superpage_probe(self) -> bool {
+        matches!(self, Self::Superpage2Mib | Self::MisalignedSuperpageFault)
+    }
+
+    const fn initial_privilege(self) -> u8 {
+        match self {
+            Self::User | Self::UserSupervisorPage => 0,
+            Self::MachineMprvSv39 => 3,
+            _ => 1,
+        }
+    }
+
     const fn starts_in_user(self) -> bool {
         matches!(self, Self::User | Self::UserSupervisorPage)
     }
@@ -134,7 +177,7 @@ impl Case {
 /// Configures the initial architectural state and returns its physical Sv39 image.
 pub fn configure_case(seed: u64, state: &mut ArchState) -> Vec<u8> {
     let case = Case::from_seed(seed);
-    state.prv = if case.starts_in_user() { 0 } else { 1 };
+    state.prv = case.initial_privilege();
     state.satp = if case.uses_remap_asid() {
         SATP_SV39_REMAP_ASID
     } else {
@@ -142,19 +185,30 @@ pub fn configure_case(seed: u64, state: &mut ArchState) -> Vec<u8> {
     };
     state.stvec = SV39_TRAP_BASE;
     state.medeleg = PAGE_FAULT_DELEGATION;
-    state.x[8] = PROBE_VA;
-    state.mstatus &= !(MSTATUS_SUM | MSTATUS_MXR);
+    state.x[8] = if case.uses_superpage_probe() {
+        SUPERPAGE_PROBE_VA
+    } else {
+        PROBE_VA
+    };
+    state.mstatus &= !(MSTATUS_MPP_MASK | MSTATUS_MPRV | MSTATUS_SUM | MSTATUS_MXR);
     state.sstatus &= !(MSTATUS_SUM | MSTATUS_MXR);
     // The identity scratch mapping is used only for debugger observation. U
     // cases make it a U page; keep SUM set so the same mapping remains readable
     // while a fault has temporarily entered the S-mode recovery handler.
-    if case == Case::SupervisorUserSumOn || case.starts_in_user() {
+    if matches!(
+        case,
+        Case::SupervisorUserSumOn | Case::InstructionPageFault
+    ) || case.starts_in_user()
+    {
         state.mstatus |= MSTATUS_SUM;
         state.sstatus |= MSTATUS_SUM;
     }
     if case == Case::SupervisorExecuteOnlyMxrOn {
         state.mstatus |= MSTATUS_MXR;
         state.sstatus |= MSTATUS_MXR;
+    }
+    if case == Case::MachineMprvSv39 {
+        state.mstatus |= MSTATUS_MPRV | MSTATUS_MPP_SUPERVISOR;
     }
     if case.is_sfence_remap() {
         state.x[5] = PROBE_PTE_ADDR;
@@ -163,6 +217,11 @@ pub fn configure_case(seed: u64, state: &mut ArchState) -> Vec<u8> {
         if case.uses_remap_asid() {
             state.x[13] = REMAP_ASID;
         }
+    }
+    if case == Case::InstructionPageFault {
+        state.x[9] = EXEC_ALIAS_VA;
+        state.x[13] = PROBE_PTE_ADDR;
+        state.x[14] = USER_EXEC_PROBE_PTE;
     }
 
     build_setup_image(case)
@@ -183,6 +242,15 @@ pub fn generate_block(rng: &mut Rng, seed: u64, num_insns: usize) -> Vec<u32> {
         let mut out = Vec::with_capacity(num_insns + 1);
         if num_insns >= sequence.len() {
             out.extend_from_slice(&sequence);
+        }
+        out.resize(num_insns, NOP);
+        out.push(EBREAK);
+        return out;
+    }
+    if case == Case::InstructionPageFault {
+        let mut out = Vec::with_capacity(num_insns + 1);
+        if num_insns >= INSN_PAGE_FAULT_SEQUENCE.len() {
+            out.extend_from_slice(&INSN_PAGE_FAULT_SEQUENCE);
         }
         out.resize(num_insns, NOP);
         out.push(EBREAK);
@@ -218,6 +286,9 @@ fn build_setup_image(case: Case) -> Vec<u8> {
         let sentinel = ALT_SENTINEL ^ index as u64;
         chunk.copy_from_slice(&sentinel.to_le_bytes());
     }
+    if case == Case::InstructionPageFault {
+        image[..4].copy_from_slice(&RET_INSN.to_le_bytes());
+    }
 
     put_pte(
         &mut image,
@@ -231,8 +302,29 @@ fn build_setup_image(case: Case) -> Vec<u8> {
         vpn_index(CODE_BASE, 1),
         pointer_pte(L0_PAGE_BASE),
     );
+    if case == Case::Superpage2Mib {
+        put_pte(
+            &mut image,
+            L1_PAGE_BASE,
+            vpn_index(SUPERPAGE_PROBE_VA, 1),
+            VALID_SUPERPAGE_PTE,
+        );
+    } else if case == Case::MisalignedSuperpageFault {
+        put_pte(
+            &mut image,
+            L1_PAGE_BASE,
+            vpn_index(SUPERPAGE_PROBE_VA, 1),
+            MISALIGNED_SUPERPAGE_PTE,
+        );
+    }
 
-    let mut code_flags = PTE_V | PTE_R | PTE_X | PTE_A | PTE_D;
+    let mut code_flags = if case == Case::MachineMprvSv39 {
+        // Leave CODE_BASE non-executable in the page table so M-mode with
+        // MPRV=1 must fetch untranslated while translating data accesses.
+        PTE_V | PTE_R | PTE_A | PTE_D
+    } else {
+        PTE_V | PTE_R | PTE_X | PTE_A | PTE_D
+    };
     if case.starts_in_user() {
         code_flags |= PTE_U;
     }
@@ -268,6 +360,14 @@ fn build_setup_image(case: Case) -> Vec<u8> {
         PTE_V | PTE_R | PTE_W | PTE_A | PTE_D | if case.starts_in_user() { PTE_U } else { 0 };
     put_leaf(&mut image, SCRATCH_BASE, identity_scratch_flags);
     put_mapping(&mut image, PROBE_VA, SCRATCH_BASE, scratch_flags);
+    if case == Case::InstructionPageFault {
+        put_mapping(
+            &mut image,
+            EXEC_ALIAS_VA,
+            ALT_PAGE_BASE,
+            PTE_V | PTE_R | PTE_X | PTE_A | PTE_D,
+        );
+    }
     for address in [ALT_PAGE_BASE, ROOT_PAGE_BASE, L1_PAGE_BASE, L0_PAGE_BASE] {
         put_leaf(&mut image, address, PTE_V | PTE_R | PTE_W | PTE_A | PTE_D);
     }
@@ -450,6 +550,74 @@ mod tests {
             assert!(short[..short.len() - 1].iter().all(|&word| word == NOP));
             assert_eq!(short.last(), Some(&EBREAK));
         }
+    }
+
+    #[test]
+    fn superpage_and_mprv_cases_configure_level1_leaves_and_machine_translation() {
+        let mut superpage_state = ArchState::default();
+        let superpage_image = configure_case(0x500c, &mut superpage_state);
+        assert_eq!(superpage_state.prv, 1);
+        assert_eq!(superpage_state.x[8], SUPERPAGE_PROBE_VA);
+        assert_eq!(
+            read_pte(&superpage_image, L1_PAGE_BASE, SUPERPAGE_PROBE_VA, 1),
+            VALID_SUPERPAGE_PTE
+        );
+
+        let mut misaligned_state = ArchState::default();
+        let misaligned_image = configure_case(0x500d, &mut misaligned_state);
+        assert_eq!(misaligned_state.prv, 1);
+        assert_eq!(misaligned_state.x[8], SUPERPAGE_PROBE_VA);
+        assert_eq!(
+            read_pte(&misaligned_image, L1_PAGE_BASE, SUPERPAGE_PROBE_VA, 1),
+            MISALIGNED_SUPERPAGE_PTE
+        );
+        assert_ne!((MISALIGNED_SUPERPAGE_PTE >> 10) & 0x1ff, 0);
+
+        let mut mprv_state = ArchState::default();
+        let mprv_image = configure_case(0x500f, &mut mprv_state);
+        assert_eq!(mprv_state.prv, 3);
+        assert_eq!(mprv_state.x[8], PROBE_VA);
+        assert_ne!(mprv_state.mstatus & MSTATUS_MPRV, 0);
+        assert_eq!(mprv_state.mstatus & MSTATUS_MPP_MASK, MSTATUS_MPP_SUPERVISOR);
+        assert_eq!(read_pte(&mprv_image, L0_PAGE_BASE, CODE_BASE, 0) & PTE_X, 0);
+    }
+
+    #[test]
+    fn instruction_page_fault_case_installs_executable_alias_and_exact_sequence() {
+        let mut state = ArchState::default();
+        let image = configure_case(0x500e, &mut state);
+
+        assert_eq!(state.prv, 1);
+        assert_ne!(state.mstatus & MSTATUS_SUM, 0);
+        assert_ne!(state.sstatus & MSTATUS_SUM, 0);
+        assert_eq!(state.x[8], PROBE_VA);
+        assert_eq!(state.x[9], EXEC_ALIAS_VA);
+        assert_eq!(state.x[13], PROBE_PTE_ADDR);
+        assert_eq!(state.x[14], USER_EXEC_PROBE_PTE);
+        assert_eq!(
+            u32::from_le_bytes(image[..4].try_into().unwrap()),
+            RET_INSN
+        );
+        assert_eq!(
+            read_pte(&image, L0_PAGE_BASE, PROBE_VA, 0),
+            INITIAL_PROBE_PTE
+        );
+        assert_eq!(
+            read_pte(&image, L0_PAGE_BASE, EXEC_ALIAS_VA, 0),
+            leaf_pte(ALT_PAGE_BASE, PTE_V | PTE_R | PTE_X | PTE_A | PTE_D)
+        );
+
+        let mut rng = Rng::new(0x500e);
+        let exact = generate_block(&mut rng, 0x500e, INSN_PAGE_FAULT_SEQUENCE.len());
+        assert_eq!(
+            &exact[..INSN_PAGE_FAULT_SEQUENCE.len()],
+            &INSN_PAGE_FAULT_SEQUENCE
+        );
+        assert_eq!(exact.last(), Some(&EBREAK));
+
+        let short = generate_block(&mut rng, 0x500e, INSN_PAGE_FAULT_SEQUENCE.len() - 1);
+        assert!(short[..short.len() - 1].iter().all(|&word| word == NOP));
+        assert_eq!(short.last(), Some(&EBREAK));
     }
 
     #[test]

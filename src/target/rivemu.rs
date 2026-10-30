@@ -161,8 +161,8 @@ mod tests {
     use crate::risu::encode::{build_supervisor_page_fault_handler, build_supervisor_trap_handler};
     use crate::risu::harness::{CODE_BASE, S_TRAP_BASE, SCRATCH_BASE, SV39_TRAP_BASE};
     use crate::risu::sv39::{
-        ALT_SENTINEL, INITIAL_PROBE_PTE, OLD_SENTINEL, PROBE_PTE_ADDR, REPLACEMENT_PTE,
-        VM_SETUP_BASE,
+        ALT_SENTINEL, EXEC_ALIAS_VA, INITIAL_PROBE_PTE, INSN_FAULT_VA, OLD_SENTINEL,
+        PROBE_PTE_ADDR, REPLACEMENT_PTE, USER_EXEC_PROBE_PTE, VM_SETUP_BASE,
     };
     use crate::risu::{RisuCase, Suite};
 
@@ -300,5 +300,108 @@ mod tests {
             assert_eq!(final_state.x[12], 0);
             assert_eq!(final_state.pc, case.end_pc());
         }
+    }
+
+    #[test]
+    fn sv39_superpage_instruction_page_fault_and_mprv_execute_as_expected() {
+        let mut target = RivemuTarget::new_bare(false).unwrap();
+        target
+            .load_ram(SV39_TRAP_BASE, &build_supervisor_page_fault_handler())
+            .unwrap();
+
+        // 0x500c: valid 2 MiB superpage load/store aliases into SCRATCH_BASE without trapping.
+        let superpage = RisuCase::generate(Suite::Sv39, 0x500c, 2).unwrap();
+        target.load_ram(CODE_BASE, superpage.code_bytes()).unwrap();
+        target.load_ram(SCRATCH_BASE, superpage.scratch()).unwrap();
+        target
+            .load_ram(VM_SETUP_BASE, superpage.vm_setup())
+            .unwrap();
+        target.set_state(superpage.init_state()).unwrap();
+        let reason = target
+            .run_until(superpage.end_pc(), superpage.max_steps() as u64)
+            .unwrap();
+        assert_eq!(reason, StopReason::Breakpoint);
+        assert_eq!(target.get_state().unwrap().scause, 0);
+
+        // 0x500d: misaligned 2 MiB superpage faults on the first load with scause = 13.
+        let misaligned = RisuCase::generate(Suite::Sv39, 0x500d, 1).unwrap();
+        target.load_ram(CODE_BASE, misaligned.code_bytes()).unwrap();
+        target.load_ram(SCRATCH_BASE, misaligned.scratch()).unwrap();
+        target
+            .load_ram(VM_SETUP_BASE, misaligned.vm_setup())
+            .unwrap();
+        target.set_state(misaligned.init_state()).unwrap();
+        let raw = u32::from_le_bytes(misaligned.code_bytes()[..4].try_into().unwrap());
+        let insn = decode::decode(raw);
+        let expected_tval =
+            misaligned.init_state().x[insn.rs1 as usize].wrapping_add(insn.imm as i64 as u64);
+        target.step_one().unwrap();
+        let trapped = target.get_state().unwrap();
+        assert_eq!(trapped.pc, SV39_TRAP_BASE);
+        assert_eq!(trapped.scause, 13);
+        assert_eq!(trapped.stval, expected_tval);
+
+        // 0x500e: instruction page fault (scause = 12) on PTE_X=0 and on U+X page in S-mode.
+        let fetch_fault = RisuCase::generate(Suite::Sv39, 0x500e, 6).unwrap();
+        target
+            .load_ram(CODE_BASE, fetch_fault.code_bytes())
+            .unwrap();
+        target
+            .load_ram(SCRATCH_BASE, fetch_fault.scratch())
+            .unwrap();
+        target
+            .load_ram(VM_SETUP_BASE, fetch_fault.vm_setup())
+            .unwrap();
+        target.set_state(fetch_fault.init_state()).unwrap();
+
+        target.step_one().unwrap(); // jalr x1, x9, -4 -> INSN_FAULT_VA
+        assert_eq!(target.get_state().unwrap().pc, INSN_FAULT_VA);
+        target.step_one().unwrap(); // instruction page fault (PTE_X = 0)
+        let first_fault = target.get_state().unwrap();
+        assert_eq!(first_fault.pc, SV39_TRAP_BASE);
+        assert_eq!(first_fault.scause, 12);
+        assert_eq!(first_fault.sepc, INSN_FAULT_VA);
+        assert_eq!(first_fault.stval, INSN_FAULT_VA);
+        for _ in 0..10 {
+            target.step_one().unwrap();
+        }
+        assert_eq!(target.get_state().unwrap().pc, EXEC_ALIAS_VA);
+        target.step_one().unwrap(); // translated ret from ALT_PAGE_BASE
+        assert_eq!(target.get_state().unwrap().pc, CODE_BASE + 4);
+
+        target.step_one().unwrap(); // ld x0, 0(x13)
+        target.step_one().unwrap(); // sd x14, 0(x13)
+        let mut pte = [0; 8];
+        target.read_ram(PROBE_PTE_ADDR, &mut pte).unwrap();
+        assert_eq!(u64::from_le_bytes(pte), USER_EXEC_PROBE_PTE);
+        target.step_one().unwrap(); // sfence.vma x8, x0
+        target.step_one().unwrap(); // ld x10, 0(x8): SUM=1 data load succeeds
+        assert_eq!(target.get_state().unwrap().pc, CODE_BASE + 20);
+        target.step_one().unwrap(); // jalr x1, x9, -4 -> INSN_FAULT_VA
+        target.step_one().unwrap(); // instruction page fault (U+X page in S-mode)
+        let second_fault = target.get_state().unwrap();
+        assert_eq!(second_fault.pc, SV39_TRAP_BASE);
+        assert_eq!(second_fault.scause, 12);
+        assert_eq!(second_fault.sepc, INSN_FAULT_VA);
+        assert_eq!(second_fault.stval, INSN_FAULT_VA);
+        for _ in 0..10 {
+            target.step_one().unwrap();
+        }
+        assert_eq!(target.get_state().unwrap().pc, EXEC_ALIAS_VA);
+        target.step_one().unwrap(); // translated ret from ALT_PAGE_BASE
+        assert_eq!(target.get_state().unwrap().pc, fetch_fault.end_pc());
+
+        // 0x500f: M-mode MPRV=1 translates data accesses while fetching untranslated.
+        let mprv = RisuCase::generate(Suite::Sv39, 0x500f, 4).unwrap();
+        target.load_ram(CODE_BASE, mprv.code_bytes()).unwrap();
+        target.load_ram(SCRATCH_BASE, mprv.scratch()).unwrap();
+        target.load_ram(VM_SETUP_BASE, mprv.vm_setup()).unwrap();
+        target.set_state(mprv.init_state()).unwrap();
+        let reason = target
+            .run_until(mprv.end_pc(), mprv.max_steps() as u64)
+            .unwrap();
+        assert_eq!(reason, StopReason::Breakpoint);
+        assert_eq!(target.get_state().unwrap().prv, 3);
+        assert_eq!(target.get_state().unwrap().mcause, 0);
     }
 }
