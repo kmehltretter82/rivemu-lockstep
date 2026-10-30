@@ -1,0 +1,117 @@
+================================================================================
+GOOGLE CLOUD COMPUTE ENGINE SETUP (<= $3 / DAY PER INSTANCE)
+================================================================================
+
+Console URL: https://console.cloud.google.com/compute/instancesAdd
+
+--------------------------------------------------------------------------------
+INSTANCE 1: rivemu-x86-1 (Primary Lockstep & Build Worker - x86_64)
+--------------------------------------------------------------------------------
+
+1. Machine configuration
+   - Name:            rivemu-x86-1
+   - Region / Zone:   us-central1 / us-central1-a  (or europe-west4 / europe-west4-a)
+   - Machine family:  General purpose
+   - Series:          E2
+   - Machine type:
+     * Option A (Spot, ~$2.05/day):     Preset -> e2-standard-8 (8 vCPU, 32 GB RAM)
+     * Option B (On-Demand, ~$2.75/day): Custom -> 4 vCPU, 8 GB RAM
+
+2. Availability policies (if using Option A Spot)
+   - Provisioning model:          Spot
+   - On VM termination / action:  Stop (DO NOT select Delete)
+
+3. Operating system and storage (Boot disk -> Change)
+   - Operating system:  Ubuntu
+   - Version:           Ubuntu 24.04 LTS (x86/64, amd64 noble image)
+   - Boot disk type:    Standard persistent disk (pd-standard, ~$0.07/day)
+   - Size:              50 GB
+
+4. Networking
+   - Network interface: Default
+   - External IPv4:     Ephemeral (Automatic)
+
+5. Security -> Manage access -> Add manually generated SSH keys -> Add item
+   Paste this exact single line:
+
+kmehltretter:ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKZJc8BYBLOto+YpbS9Zm8EfBgv+xnREem2uV2Nl3qDx kmehltretter
+
+6. Click "Create"
+
+
+--------------------------------------------------------------------------------
+INSTANCE 2: rivemu-x86-2 (Linux Kernel A/B & riscv-tests Worker - x86_64)
+--------------------------------------------------------------------------------
+
+1. Machine configuration
+   - Name:            rivemu-x86-2
+   - Region / Zone:   Same region/zone as rivemu-x86-1
+   - Machine family:  General purpose
+   - Series:          E2 (or N2D)
+   - Machine type:
+     * Option A (Spot, ~$2.05/day):     Preset -> e2-standard-8 (8 vCPU, 32 GB RAM)
+     * Option B (On-Demand, ~$2.75/day): Custom -> 4 vCPU, 8 GB RAM
+
+2. Availability policies (if using Option A Spot)
+   - Provisioning model:          Spot
+   - On VM termination / action:  Stop
+
+3. Operating system and storage (Boot disk -> Change)
+   - Operating system:  Ubuntu
+   - Version:           Ubuntu 24.04 LTS (x86/64, amd64 noble image)
+   - Boot disk type:    Standard persistent disk
+   - Size:              50 GB
+
+4. Security -> Manage access -> Add manually generated SSH keys -> Add item
+   Paste this exact single line:
+
+kmehltretter:ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKZJc8BYBLOto+YpbS9Zm8EfBgv+xnREem2uV2Nl3qDx kmehltretter
+
+5. Click "Create"
+
+
+--------------------------------------------------------------------------------
+INSTANCE 3: rivemu-arm64-1 (Native ARM64 Linux Build & Benchmark Worker - arm64)
+--------------------------------------------------------------------------------
+
+1. Machine configuration
+   - Name:            rivemu-arm64-1
+   - Region / Zone:   us-central1 / us-central1-a  (or europe-west4 / europe-west4-a)
+   - Machine family:  General purpose
+   - Series:          T2A (or C4A)
+   - Machine type:
+     * Option A (Spot, ~$1.45/day):      t2a-standard-4 (4 vCPU, 16 GB RAM)
+     * Option B (On-Demand, ~$1.95/day): t2a-standard-2 (2 vCPU, 8 GB RAM)
+                                         (or c4a-standard-2: 2 vCPU, 8 GB RAM)
+
+2. Availability policies (if using Option A Spot)
+   - Provisioning model:          Spot
+   - On VM termination / action:  Stop
+
+3. Operating system and storage (Boot disk -> Change)
+   - Operating system:  Ubuntu
+   - Version:           Ubuntu 24.04 LTS (arm64 noble image)
+   - Boot disk type:    Standard persistent disk (or Hyperdisk Balanced if C4A)
+   - Size:              50 GB
+
+4. Security -> Manage access -> Add manually generated SSH keys -> Add item
+   Paste this exact single line:
+
+kmehltretter:ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKZJc8BYBLOto+YpbS9Zm8EfBgv+xnREem2uV2Nl3qDx kmehltretter
+
+5. Click "Create"
+
+
+--------------------------------------------------------------------------------
+AFTER CREATING THE INSTANCES
+--------------------------------------------------------------------------------
+
+Copy the External IPv4 addresses of the 3 instances and run from
+/Users/kmehltretter/codex/linux-work/rivemu-lockstep:
+
+  for ip in <IP_1> <IP_2> <IP_3>; do
+    ssh -o StrictHostKeyChecking=accept-new kmehltretter@$ip 'bash -s' < scripts/bootstrap-gce-worker.sh &
+  done
+  wait
+
+  ./scripts/sync-gce-workers.sh kmehltretter@<IP_1> kmehltretter@<IP_2> kmehltretter@<IP_3>

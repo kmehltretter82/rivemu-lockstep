@@ -29,12 +29,14 @@ pub enum Suite {
     Privileged,
     /// Sv39 translation, page permissions, and delegated page-fault recovery.
     Sv39,
+    /// Sv48 4-level translation, high canonical VAs, and delegated page-fault recovery.
+    Sv48,
     /// Directed RV64A AMO and LR/SC semantics over sandboxed scratch memory.
     Atomics,
     /// Legal, sequential RV64C integer and scratch-memory operations.
     Compressed,
     /// Original mixed suites, excluding specialized [`Self::Atomics`], [`Self::FpEdges`],
-    /// [`Self::Privileged`], [`Self::Sv39`], and [`Self::Compressed`] suites.
+    /// [`Self::Privileged`], [`Self::Sv39`], [`Self::Sv48`], and [`Self::Compressed`] suites.
     All,
 }
 
@@ -53,6 +55,7 @@ impl Suite {
             "csr" | "trap" | "csrtrap" => Some(Self::CsrTrap),
             "priv" | "privileged" | "lower-priv" => Some(Self::Privileged),
             "sv39" | "paging" | "vm" => Some(Self::Sv39),
+            "sv48" | "sv48-paging" => Some(Self::Sv48),
             "atomic" | "atomics" | "rv64a" | "lrsc" => Some(Self::Atomics),
             "compressed" | "rvc" | "c" => Some(Self::Compressed),
             "all" => Some(Self::All),
@@ -74,6 +77,7 @@ impl Suite {
             Self::CsrTrap => "csr-trap",
             Self::Privileged => "privileged-traps",
             Self::Sv39 => "sv39-paging",
+            Self::Sv48 => "sv48-paging",
             Self::Atomics => "rv64a-directed",
             Self::Compressed => "rv64c",
             Self::All => "all",
@@ -131,7 +135,9 @@ pub fn generate_block(rng: &mut Rng, suite: Suite, num_insns: usize) -> Vec<u32>
                 out.push(gen_privileged_case(privileged_selector, rng));
                 privileged_selector = (privileged_selector + 1) % PRIVILEGED_CASES;
             }
-            Suite::Sv39 => unreachable!("Sv39 instructions use sv39::generate_block"),
+            Suite::Sv39 | Suite::Sv48 => {
+                unreachable!("Sv39/Sv48 instructions use sv39::generate_block")
+            }
             Suite::Atomics => {
                 gen_atomic_case(atomic_selector, atomic_slot, &mut out);
                 atomic_slot += 1;

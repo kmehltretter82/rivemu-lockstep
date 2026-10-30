@@ -28,10 +28,14 @@ pub const ROOT_PAGE_BASE: u64 = ALT_PAGE_BASE + PAGE_SIZE as u64;
 pub const L1_PAGE_BASE: u64 = ROOT_PAGE_BASE + PAGE_SIZE as u64;
 /// Physical base of the Sv39 level-0 page table.
 pub const L0_PAGE_BASE: u64 = L1_PAGE_BASE + PAGE_SIZE as u64;
+/// Physical base of the Sv48 level-3 root page table.
+pub const L3_PAGE_BASE: u64 = L0_PAGE_BASE + PAGE_SIZE as u64;
 /// Base of the contiguous alternate-page and page-table setup image.
 pub const VM_SETUP_BASE: u64 = ALT_PAGE_BASE;
 /// Length of the contiguous Sv39 setup image.
 pub const VM_SETUP_LEN: usize = PAGE_SIZE * 4;
+/// Length of the contiguous Sv48 setup image (adds the level-3 root page table).
+pub const SV48_VM_SETUP_LEN: usize = PAGE_SIZE * 5;
 /// Guest virtual alias used for permission probes over the physical scratch page.
 pub const PROBE_VA: u64 = VM_SETUP_BASE + VM_SETUP_LEN as u64;
 /// Executable virtual alias immediately above `PROBE_VA` used for fetch-fault recovery.
@@ -48,10 +52,16 @@ pub const RESERVED_RW_VA: u64 = EXEC_ALIAS_VA + PAGE_SIZE as u64;
 pub const NONLEAF_ADU_VA: u64 = CODE_BASE + 0x0040_0000;
 /// Non-canonical Sv39 virtual address (`va[38] = 1`, `va[63:39] = 0`).
 pub const NONCANONICAL_SV39_VA: u64 = 1u64 << 38;
+/// High positive Sv48 virtual base (`vpn[3] = 1`, `512 GiB`).
+pub const SV48_HIGH_BASE: u64 = 1u64 << 39;
+/// Non-canonical Sv48 virtual address (`va[47] = 1`, `va[63:48] = 0`).
+pub const NONCANONICAL_SV48_VA: u64 = 1u64 << 47;
 
 const SATP_SV39: u64 = (8u64 << 60) | (ROOT_PAGE_BASE >> 12);
+pub(crate) const SATP_SV48: u64 = (9u64 << 60) | (L3_PAGE_BASE >> 12);
 pub(crate) const REMAP_ASID: u64 = 1;
 pub(crate) const SATP_SV39_REMAP_ASID: u64 = SATP_SV39 | (REMAP_ASID << 44);
+pub(crate) const SATP_SV48_REMAP_ASID: u64 = SATP_SV48 | (REMAP_ASID << 44);
 const PAGE_FAULT_DELEGATION: u64 = (1 << 12) | (1 << 13) | (1 << 15);
 const REMAP_FLAGS: u64 = PTE_V | PTE_R | PTE_W | PTE_A | PTE_D;
 
@@ -238,6 +248,40 @@ pub fn configure_case(seed: u64, state: &mut ArchState) -> Vec<u8> {
     }
 
     build_setup_image(case)
+}
+
+/// Configures the initial architectural state and returns its physical 4-level Sv48 image.
+pub fn configure_sv48_case(seed: u64, state: &mut ArchState) -> Vec<u8> {
+    let case = Case::from_seed(seed);
+    let mut image = configure_case(seed, state);
+    image.resize(SV48_VM_SETUP_LEN, 0);
+    put_pte(
+        &mut image,
+        L3_PAGE_BASE,
+        vpn_index(CODE_BASE, 3),
+        pointer_pte(ROOT_PAGE_BASE),
+    );
+    put_pte(
+        &mut image,
+        L3_PAGE_BASE,
+        vpn_index(SV48_HIGH_BASE, 3),
+        pointer_pte(ROOT_PAGE_BASE),
+    );
+    state.satp = if case.uses_remap_asid() {
+        SATP_SV48_REMAP_ASID
+    } else {
+        SATP_SV48
+    };
+    state.x[8] |= SV48_HIGH_BASE;
+    if case == Case::MisalignedSuperpageFault {
+        state.x[9] |= SV48_HIGH_BASE;
+        state.x[10] |= SV48_HIGH_BASE;
+        state.x[11] = NONCANONICAL_SV48_VA;
+    }
+    if case == Case::InstructionPageFault {
+        state.x[9] |= SV48_HIGH_BASE;
+    }
+    image
 }
 
 /// Fixes the remap case's old-page sentinel so a stale translation is observable.
@@ -498,7 +542,7 @@ mod tests {
             assert_eq!(state.sstatus & MSTATUS_MXR != 0, seed == 5);
             assert_eq!(code & PTE_U != 0, matches!(seed, 1 | 6));
             assert_ne!(code & PTE_X, 0);
-            assert_eq!(scratch & PTE_U != 0, matches!(seed, 1 | 2 | 3));
+            assert_eq!(scratch & PTE_U != 0, matches!(seed, 1..=3));
             assert_eq!(
                 scratch & PTE_R == 0 && scratch & PTE_X != 0,
                 matches!(seed, 4 | 5)
@@ -681,5 +725,29 @@ mod tests {
                 assert!(expected, "seed {seed} generated {:?}", insn.op);
             }
         }
+    }
+
+    #[test]
+    fn sv48_setup_image_installs_level3_root_and_high_virtual_aliases() {
+        let mut state = ArchState::default();
+        let image = configure_sv48_case(0x6000, &mut state);
+        assert_eq!(image.len(), SV48_VM_SETUP_LEN);
+        assert_eq!(state.satp, SATP_SV48);
+        assert_eq!(state.x[8], SV48_HIGH_BASE | PROBE_VA);
+        assert_eq!(
+            read_pte(&image, L3_PAGE_BASE, CODE_BASE, 3),
+            pointer_pte(ROOT_PAGE_BASE)
+        );
+        assert_eq!(
+            read_pte(&image, L3_PAGE_BASE, SV48_HIGH_BASE, 3),
+            pointer_pte(ROOT_PAGE_BASE)
+        );
+
+        let mut misaligned = ArchState::default();
+        let _ = configure_sv48_case(0x600d, &mut misaligned);
+        assert_eq!(misaligned.x[8], SV48_HIGH_BASE | SUPERPAGE_PROBE_VA);
+        assert_eq!(misaligned.x[9], SV48_HIGH_BASE | RESERVED_RW_VA);
+        assert_eq!(misaligned.x[10], SV48_HIGH_BASE | NONLEAF_ADU_VA);
+        assert_eq!(misaligned.x[11], NONCANONICAL_SV48_VA);
     }
 }

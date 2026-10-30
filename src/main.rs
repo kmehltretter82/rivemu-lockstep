@@ -65,7 +65,7 @@ Usage:
 
 RISU Options:
   --reference <sail|qemu>                       Reference model [default: sail]
-  --suite <alu|control|fence-i|mul|bitmanip|float|fp-edges|mem|csr|privileged|sv39|atomics|compressed|all>
+  --suite <alu|control|fence-i|mul|bitmanip|float|fp-edges|mem|csr|privileged|sv39|sv48|atomics|compressed|all>
                                                  Instruction suite [default: all]
   --blocks <N>                                   Number of random blocks [default: 50]
   --insns <K>                                    Instructions per block [default: 32]
@@ -255,10 +255,14 @@ fn main() -> ExitCode {
         }
     } else {
         let t0 = Instant::now();
-        let effective_check_csrs = check_csrs || matches!(suite, Suite::Privileged | Suite::Sv39);
+        let effective_check_csrs =
+            check_csrs || matches!(suite, Suite::Privileged | Suite::Sv39 | Suite::Sv48);
         let effective_step_check = step_check
             || reference == RisuReference::Sail
-            || matches!(suite, Suite::FpEdges | Suite::Privileged | Suite::Sv39);
+            || matches!(
+                suite,
+                Suite::FpEdges | Suite::Privileged | Suite::Sv39 | Suite::Sv48
+            );
         match reference {
             RisuReference::Qemu => {
                 let rivemu = match RivemuTarget::new_bare(strict) {

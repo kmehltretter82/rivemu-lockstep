@@ -84,10 +84,10 @@ impl RisuCase {
         if suite == Suite::Privileged {
             configure_privileged_initial_state(seed, &mut init_state);
         }
-        let vm_setup = if suite == Suite::Sv39 {
-            sv39::configure_case(seed, &mut init_state)
-        } else {
-            Vec::new()
+        let vm_setup = match suite {
+            Suite::Sv39 => sv39::configure_case(seed, &mut init_state),
+            Suite::Sv48 => sv39::configure_sv48_case(seed, &mut init_state),
+            _ => Vec::new(),
         };
         let (code_bytes, generated_insns) = if suite == Suite::Compressed {
             let insns = generate_compressed_block(&mut rng, num_insns);
@@ -100,7 +100,7 @@ impl RisuCase {
         } else {
             let insns = match suite {
                 Suite::Privileged => generate_privileged_block(&mut rng, seed, num_insns),
-                Suite::Sv39 => sv39::generate_block(&mut rng, seed, num_insns),
+                Suite::Sv39 | Suite::Sv48 => sv39::generate_block(&mut rng, seed, num_insns),
                 _ => generate_block(&mut rng, suite, num_insns),
             };
             let generated_insns = insns.len().checked_sub(1).ok_or_else(|| {
@@ -127,7 +127,7 @@ impl RisuCase {
         for chunk in scratch.chunks_exact_mut(8) {
             chunk.copy_from_slice(&rng.edge_u64().to_le_bytes());
         }
-        if suite == Suite::Sv39 {
+        if matches!(suite, Suite::Sv39 | Suite::Sv48) {
             sv39::configure_scratch(seed, &mut scratch);
         }
 
@@ -154,7 +154,12 @@ impl RisuCase {
     pub const fn uses_scratch(&self) -> bool {
         matches!(
             self.suite,
-            Suite::SandboxMem | Suite::Sv39 | Suite::Atomics | Suite::Compressed | Suite::All
+            Suite::SandboxMem
+                | Suite::Sv39
+                | Suite::Sv48
+                | Suite::Atomics
+                | Suite::Compressed
+                | Suite::All
         )
     }
 
@@ -448,7 +453,7 @@ impl<C: CosimTarget, R: CosimTarget> RisuHarness<C, R> {
 
     /// Runs an already materialized case identically on candidate and reference.
     pub fn run_case(&mut self, case: &RisuCase) -> Result<Option<BisectReport>, TargetError> {
-        if matches!(case.suite, Suite::Privileged | Suite::Sv39) && !self.check_csrs {
+        if matches!(case.suite, Suite::Privileged | Suite::Sv39 | Suite::Sv48) && !self.check_csrs {
             return Err(TargetError::Protocol(format!(
                 "{} suite requires privileged CSR comparison",
                 case.suite.name()

@@ -141,7 +141,8 @@ impl SailGdbTarget {
         let bootstrap_insns = u32::try_from(bootstrap_code.len() / 4)
             .expect("Sail bootstrap instruction count fits u32");
         let bootstrap = SailBootstrap::new(SAIL_BOOTSTRAP_BASE, bootstrap_insns, TRAP_BASE);
-        let spawn_result = if matches!(case.suite(), Suite::Privileged | Suite::Sv39) {
+        let spawn_result = if matches!(case.suite(), Suite::Privileged | Suite::Sv39 | Suite::Sv48)
+        {
             // Model an implementation with no PMP entries so direct S/U-mode
             // execution and page-table walks can reach test RAM. Rivemu's bare
             // lockstep target uses the corresponding non-strict PMP policy.

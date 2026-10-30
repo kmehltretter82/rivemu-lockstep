@@ -56,10 +56,21 @@ impl CosimTarget for RivemuTarget {
     }
 
     fn read_ram(&mut self, gpa: u64, buf: &mut [u8]) -> Result<(), TargetError> {
-        self.machine
-            .bus
-            .read_bytes(gpa, buf)
-            .map_err(|e| TargetError::Protocol(e.to_string()))
+        if self.machine.bus.read_bytes(gpa, buf).is_ok() {
+            return Ok(());
+        }
+        let h = &self.machine.harts[0];
+        for (i, byte) in buf.iter_mut().enumerate() {
+            let va = gpa.wrapping_add(i as u64);
+            let pa = h.debug_translate(&self.machine.bus, va).unwrap_or(va);
+            let mut single = [0u8; 1];
+            self.machine
+                .bus
+                .read_bytes(pa, &mut single)
+                .map_err(|e| TargetError::Protocol(e.to_string()))?;
+            *byte = single[0];
+        }
+        Ok(())
     }
 
     fn set_trap_vector(&mut self, addr: u64) -> Result<(), TargetError> {

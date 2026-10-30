@@ -238,8 +238,8 @@ impl CosimTarget for QemuGdbTarget {
         self.write_csr(csr::SENVCFG, 0)?;
         let mut g_pkt = String::with_capacity(1 + 33 * 16);
         g_pkt.push('G');
-        for i in 0..32 {
-            let v = if i == 0 { 0 } else { state.x[i] };
+        for (i, &reg) in state.x.iter().enumerate() {
+            let v = if i == 0 { 0 } else { reg };
             g_pkt.push_str(&encode_le_hex_u64(v));
         }
         g_pkt.push_str(&encode_le_hex_u64(state.pc));
@@ -247,8 +247,8 @@ impl CosimTarget for QemuGdbTarget {
         if resp != "OK" {
             return Err(TargetError::Protocol(format!("GDB G failed: '{resp}'")));
         }
-        for i in 0..32 {
-            self.write_reg(33 + i as u32, state.f[i])?;
+        for (i, &reg) in state.f.iter().enumerate() {
+            self.write_reg(33 + i as u32, reg)?;
         }
         self.write_csr(csr::FCSR, u64::from(state.fcsr & 0xff))?;
         self.write_reg(PRIV_GDB_REG, u64::from(state.prv))?;

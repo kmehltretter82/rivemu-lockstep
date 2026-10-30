@@ -152,14 +152,14 @@ impl Rng {
             prv: 3,
             ..ArchState::default()
         };
-        for i in 1..32 {
-            state.x[i] = self.edge_u64();
+        for reg in state.x.iter_mut().skip(1) {
+            *reg = self.edge_u64();
         }
         // Reserve s0 (x8) for the 4 KiB scratch RAM base and s11 (x27) for trap signature accumulation.
         state.x[8] = scratch_base;
         state.x[27] = 0;
-        for i in 0..32 {
-            state.f[i] = self.edge_f64_bits();
+        for reg in &mut state.f {
+            *reg = self.edge_f64_bits();
         }
         // Valid dynamic rounding modes are 0..=4 (RNE, RTZ, RDN, RUP, RMM).
         let frm = (self.next_u64() % 5) as u32;
