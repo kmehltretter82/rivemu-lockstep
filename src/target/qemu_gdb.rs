@@ -32,7 +32,7 @@ impl QemuGdbTarget {
                 "-machine",
                 "virt",
                 "-cpu",
-                "rv64,c=true,h=false,pmp=false,sv57=false,zba=true,zbb=true,zbc=true,zbs=true,zicbom=true,zicboz=true,svinval=true,svpbmt=true,sstc=true",
+                "rv64,c=true,h=false,pmp=false,sv57=false,zba=true,zbb=true,zbc=true,zbs=true,zicond=true,zicbom=true,zicboz=true,svinval=true,svpbmt=true,sstc=true",
                 "-m",
                 "128M",
                 "-smp",

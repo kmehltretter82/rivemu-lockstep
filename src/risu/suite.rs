@@ -176,21 +176,16 @@ pub fn generate_privileged_block(rng: &mut Rng, seed: u64, num_insns: usize) -> 
 /// serialization.
 pub fn generate_compressed_block(rng: &mut Rng, num_insns: usize) -> Vec<u16> {
     let mut out = Vec::with_capacity(num_insns);
+    let mut sp_offset: i32 = 0;
     while out.len() < num_insns {
-        let insn = match rng.next_u64() % 24 {
+        let insn = match rng.next_u64() % 34 {
             // Give C.ADDI and its architecturally defined hints extra weight.
             0 => encode_ci(0b000, 0, 0),                 // C.NOP
             1 => encode_ci(0b000, 0, nonzero_imm6(rng)), // C.ADDI hint
             2..=4 => encode_ci(0b000, compressed_rd(rng), random_imm6(rng)),
             5 => encode_ci(0b001, compressed_rd(rng), random_imm6(rng)), // C.ADDIW
             6 => encode_ci(0b010, compressed_rd(rng), random_imm6(rng)), // C.LI
-            7 => {
-                let mut rd = compressed_rd(rng);
-                while rd == 2 {
-                    rd = compressed_rd(rng);
-                }
-                encode_ci(0b011, rd, nonzero_imm6(rng)) // C.LUI
-            }
+            7 => encode_ci(0b011, compressed_rd(rng), nonzero_imm6(rng)), // C.LUI (rd != 2)
             8 => encode_cb_imm(0b00, compact_dest(rng), random_imm6(rng)), // C.SRLI
             9 => encode_cb_imm(0b01, compact_dest(rng), random_imm6(rng)), // C.SRAI
             10 => encode_cb_imm(0b10, compact_dest(rng), random_imm6(rng)), // C.ANDI
@@ -200,13 +195,27 @@ pub fn generate_compressed_block(rng: &mut Rng, num_insns: usize) -> Vec<u16> {
             14 => encode_ca(0, 0b11, compact_dest(rng), compact_src(rng)), // C.AND
             15 => encode_ca(1, 0b00, compact_dest(rng), compact_src(rng)), // C.SUBW
             16 => encode_ca(1, 0b01, compact_dest(rng), compact_src(rng)), // C.ADDW
-            17 => encode_ci_shift(compressed_rd(rng), random_imm6(rng)),   // C.SLLI
-            18 => encode_cr(0, compressed_rd(rng), nonzero_reg(rng)),      // C.MV
-            19 => encode_cr(1, compressed_rd(rng), nonzero_reg(rng)),      // C.ADD
+            17 => encode_ci_shift(compressed_rd(rng), random_imm6(rng)), // C.SLLI
+            18 => encode_cr(0, compressed_rd(rng), nonzero_reg(rng)),    // C.MV
+            19 => encode_cr(1, compressed_rd(rng), nonzero_reg(rng)),    // C.ADD
             20 => encode_compact_mem(0b010, compact_dest(rng), word_offset(rng)), // C.LW
             21 => encode_compact_mem(0b011, compact_dest(rng), double_offset(rng)), // C.LD
             22 => encode_compact_mem(0b110, compact_dest(rng), word_offset(rng)), // C.SW
-            _ => encode_compact_mem(0b111, compact_dest(rng), double_offset(rng)), // C.SD
+            23 => encode_compact_mem(0b111, compact_dest(rng), double_offset(rng)), // C.SD
+            24 => encode_compact_mem(0b001, compact_dest(rng), double_offset(rng)), // C.FLD
+            25 => encode_compact_mem(0b101, compact_dest(rng), double_offset(rng)), // C.FSD
+            26 => encode_addi4spn(compact_dest(rng), addi4spn_offset(rng)), // C.ADDI4SPN
+            27 => {
+                let delta = addi16sp_delta(rng, sp_offset);
+                sp_offset += delta;
+                encode_addi16sp(delta) // C.ADDI16SP
+            }
+            28 => encode_lwsp(compressed_nonzero_rd(rng), sp_word_offset(rng)), // C.LWSP
+            29 => encode_ldsp(compressed_nonzero_rd(rng), sp_double_offset(rng)), // C.LDSP
+            30 => encode_fldsp(rng.pick_fpr(), sp_double_offset(rng)),          // C.FLDSP
+            31 => encode_swsp(rng.pick_src_gpr(), sp_word_offset(rng)),         // C.SWSP
+            32 => encode_sdsp(rng.pick_src_gpr(), sp_double_offset(rng)),       // C.SDSP
+            _ => encode_fsdsp(rng.pick_fpr(), sp_double_offset(rng)),           // C.FSDSP
         };
         out.push(insn);
     }
@@ -223,8 +232,20 @@ fn nonzero_imm6(rng: &mut Rng) -> u8 {
 }
 
 fn compressed_rd(rng: &mut Rng) -> u8 {
-    // `pick_gpr` excludes x8, which must retain SCRATCH_BASE throughout the block.
-    rng.pick_gpr()
+    // Exclude x2 (`sp` stack scratch base) and x8 (`s0` scratch base).
+    let mut rd = rng.pick_gpr();
+    while rd == 2 {
+        rd = rng.pick_gpr();
+    }
+    rd
+}
+
+fn compressed_nonzero_rd(rng: &mut Rng) -> u8 {
+    let mut rd = compressed_rd(rng);
+    while rd == 0 {
+        rd = compressed_rd(rng);
+    }
+    rd
 }
 
 fn compact_dest(rng: &mut Rng) -> u8 {
@@ -246,6 +267,108 @@ fn word_offset(rng: &mut Rng) -> u16 {
 
 fn double_offset(rng: &mut Rng) -> u16 {
     ((rng.next_u64() % 32) * 8) as u16
+}
+
+fn sp_word_offset(rng: &mut Rng) -> u16 {
+    ((rng.next_u64() % 64) * 4) as u16
+}
+
+fn sp_double_offset(rng: &mut Rng) -> u16 {
+    ((rng.next_u64() % 64) * 8) as u16
+}
+
+fn addi4spn_offset(rng: &mut Rng) -> u16 {
+    (1 + (rng.next_u64() % 255) as u16) * 4
+}
+
+fn addi16sp_delta(rng: &mut Rng, sp_offset: i32) -> i32 {
+    let raw = (((rng.next_u64() % 63) as i32) - 31) * 16;
+    let delta = if raw == 0 { 16 } else { raw };
+    if (-1024..=1024).contains(&(sp_offset + delta)) {
+        delta
+    } else {
+        -delta
+    }
+}
+
+fn encode_addi4spn(rd_prime: u8, nzuimm: u16) -> u16 {
+    debug_assert!(rd_prime > 0 && rd_prime < 8);
+    debug_assert!((4..=1020).contains(&nzuimm) && nzuimm % 4 == 0);
+    (((nzuimm >> 4) & 0x3) << 11)
+        | (((nzuimm >> 6) & 0xf) << 7)
+        | (((nzuimm >> 2) & 1) << 6)
+        | (((nzuimm >> 3) & 1) << 5)
+        | (u16::from(rd_prime) << 2)
+}
+
+fn encode_addi16sp(nzimm: i32) -> u16 {
+    debug_assert!(nzimm != 0 && (-512..=496).contains(&nzimm) && nzimm % 16 == 0);
+    let bits = nzimm as u32;
+    (0b011 << 13)
+        | ((((bits >> 9) & 1) as u16) << 12)
+        | (2 << 7)
+        | ((((bits >> 4) & 1) as u16) << 6)
+        | ((((bits >> 6) & 1) as u16) << 5)
+        | ((((bits >> 7) & 0x3) as u16) << 3)
+        | ((((bits >> 5) & 1) as u16) << 2)
+        | 0b01
+}
+
+fn encode_lwsp(rd: u8, offset: u16) -> u16 {
+    debug_assert!(rd > 0 && rd < 32 && offset <= 252 && offset % 4 == 0);
+    (0b010 << 13)
+        | (((offset >> 5) & 1) << 12)
+        | (u16::from(rd) << 7)
+        | (((offset >> 2) & 0x7) << 4)
+        | (((offset >> 6) & 0x3) << 2)
+        | 0b10
+}
+
+fn encode_ldsp(rd: u8, offset: u16) -> u16 {
+    debug_assert!(rd > 0 && rd < 32 && offset <= 504 && offset % 8 == 0);
+    (0b011 << 13)
+        | (((offset >> 5) & 1) << 12)
+        | (u16::from(rd) << 7)
+        | (((offset >> 3) & 0x3) << 5)
+        | (((offset >> 6) & 0x7) << 2)
+        | 0b10
+}
+
+fn encode_fldsp(fd: u8, offset: u16) -> u16 {
+    debug_assert!(fd < 32 && offset <= 504 && offset % 8 == 0);
+    (0b001 << 13)
+        | (((offset >> 5) & 1) << 12)
+        | (u16::from(fd) << 7)
+        | (((offset >> 3) & 0x3) << 5)
+        | (((offset >> 6) & 0x7) << 2)
+        | 0b10
+}
+
+fn encode_swsp(rs2: u8, offset: u16) -> u16 {
+    debug_assert!(rs2 < 32 && offset <= 252 && offset % 4 == 0);
+    (0b110 << 13)
+        | (((offset >> 2) & 0xf) << 9)
+        | (((offset >> 6) & 0x3) << 7)
+        | (u16::from(rs2) << 2)
+        | 0b10
+}
+
+fn encode_sdsp(rs2: u8, offset: u16) -> u16 {
+    debug_assert!(rs2 < 32 && offset <= 504 && offset % 8 == 0);
+    (0b111 << 13)
+        | (((offset >> 3) & 0x7) << 10)
+        | (((offset >> 6) & 0x7) << 7)
+        | (u16::from(rs2) << 2)
+        | 0b10
+}
+
+fn encode_fsdsp(fs2: u8, offset: u16) -> u16 {
+    debug_assert!(fs2 < 32 && offset <= 504 && offset % 8 == 0);
+    (0b101 << 13)
+        | (((offset >> 3) & 0x7) << 10)
+        | (((offset >> 6) & 0x7) << 7)
+        | (u16::from(fs2) << 2)
+        | 0b10
 }
 
 fn encode_ci(funct3: u16, rd: u8, imm6: u8) -> u16 {
@@ -289,7 +412,7 @@ fn encode_cr(high_bit: u16, rd: u8, rs2: u8) -> u16 {
 }
 
 fn encode_compact_mem(funct3: u16, reg_prime: u8, offset: u16) -> u16 {
-    debug_assert!(matches!(funct3, 0b010 | 0b011 | 0b110 | 0b111));
+    debug_assert!(matches!(funct3, 0b001 | 0b010 | 0b011 | 0b101 | 0b110 | 0b111));
     debug_assert!(reg_prime > 0 && reg_prime < 8);
     let offset_bits = if funct3 == 0b010 || funct3 == 0b110 {
         debug_assert!(offset <= 124 && offset % 4 == 0);
@@ -471,7 +594,7 @@ fn gen_bitmanip(rng: &mut Rng) -> u32 {
     let shamt6 = (rng.next_u64() & 63) as i32;
     let shamt5 = (rng.next_u64() & 31) as i32;
 
-    match rng.next_u64() % 43 {
+    match rng.next_u64() % 47 {
         // Zba
         0 => r_type(0x3b, rd, 0b000, rs1, rs2, 0x04), // add.uw
         1 => r_type(0x33, rd, 0b010, rs1, rs2, 0x10), // sh1add
@@ -518,7 +641,12 @@ fn gen_bitmanip(rng: &mut Rng) -> u32 {
         39 => r_type(0x33, rd, 0b001, rs1, rs2, 0x34), // binv
         40 => i_type(0x13, rd, 0b001, rs1, 0x680 | shamt6), // binvi
         41 => r_type(0x33, rd, 0b001, rs1, rs2, 0x14), // bset
-        _ => i_type(0x13, rd, 0b001, rs1, 0x280 | shamt6), // bseti
+        42 => i_type(0x13, rd, 0b001, rs1, 0x280 | shamt6), // bseti
+        // Zicond
+        43 => r_type(0x33, rd, 0b101, rs1, rs2, 0x07), // czero.eqz
+        44 => r_type(0x33, rd, 0b111, rs1, rs2, 0x07), // czero.nez
+        45 => r_type(0x33, rd, 0b101, rs1, 0, 0x07),   // czero.eqz rd, rs1, x0
+        _ => r_type(0x33, rd, 0b111, rs1, 0, 0x07),    // czero.nez rd, rs1, x0
     }
 }
 
@@ -1196,6 +1324,7 @@ mod tests {
             let halfwords = generate_compressed_block(&mut rng, 128);
             assert_eq!(halfwords.len(), 128);
 
+            let mut sp_rel: i32 = 2048;
             for raw in halfwords {
                 assert_ne!(raw & 3, 3, "seed {seed:#x}, raw {raw:#06x}");
                 let insn = decode::decode_compressed(raw);
@@ -1221,25 +1350,46 @@ mod tests {
                             | Op::Add
                             | Op::Lw
                             | Op::Ld
+                            | Op::Fload
                             | Op::Sw
                             | Op::Sd
+                            | Op::Fstore
                     ),
                     "unexpected operation for seed {seed:#x}, raw {raw:#06x}: {insn:?}"
                 );
 
                 match insn.op {
-                    Op::Lw | Op::Ld => {
+                    Op::Lw | Op::Ld | Op::Fload => {
                         let width = if insn.op == Op::Lw { 4 } else { 8 };
-                        assert_eq!(insn.rs1, 8);
-                        assert!((9..=15).contains(&insn.rd));
-                        assert!(insn.imm >= 0 && insn.imm + width <= SCRATCH_LEN);
+                        let base = if insn.rs1 == 8 {
+                            if insn.op != Op::Fload {
+                                assert!((9..=15).contains(&insn.rd));
+                            }
+                            0
+                        } else {
+                            assert_eq!(insn.rs1, 2);
+                            if insn.op != Op::Fload {
+                                assert_ne!(insn.rd, 0);
+                                assert_ne!(insn.rd, 2);
+                                assert_ne!(insn.rd, 8);
+                            }
+                            sp_rel
+                        };
+                        assert!(base + insn.imm >= 0 && base + insn.imm + width <= SCRATCH_LEN);
                         assert_eq!(insn.imm % width, 0);
                     }
-                    Op::Sw | Op::Sd => {
+                    Op::Sw | Op::Sd | Op::Fstore => {
                         let width = if insn.op == Op::Sw { 4 } else { 8 };
-                        assert_eq!(insn.rs1, 8);
-                        assert!((9..=15).contains(&insn.rs2));
-                        assert!(insn.imm >= 0 && insn.imm + width <= SCRATCH_LEN);
+                        let base = if insn.rs1 == 8 {
+                            if insn.op != Op::Fstore {
+                                assert!((9..=15).contains(&insn.rs2));
+                            }
+                            0
+                        } else {
+                            assert_eq!(insn.rs1, 2);
+                            sp_rel
+                        };
+                        assert!(base + insn.imm >= 0 && base + insn.imm + width <= SCRATCH_LEN);
                         assert_eq!(insn.imm % width, 0);
                     }
                     Op::Lui => {
@@ -1247,10 +1397,22 @@ mod tests {
                         assert_ne!(insn.rd, 8);
                         assert_ne!(insn.imm, 0);
                     }
-                    _ => assert_ne!(
-                        insn.rd, 8,
-                        "x8 scratch base clobber for seed {seed:#x}, raw {raw:#06x}: {insn:?}"
-                    ),
+                    Op::Addi if insn.rd == 2 => {
+                        assert_eq!(insn.rs1, 2);
+                        assert_eq!(insn.imm % 16, 0);
+                        sp_rel += insn.imm;
+                        assert!((1024..=3072).contains(&sp_rel));
+                    }
+                    _ => {
+                        assert_ne!(
+                            insn.rd, 2,
+                            "x2 sp base clobber for seed {seed:#x}, raw {raw:#06x}: {insn:?}"
+                        );
+                        assert_ne!(
+                            insn.rd, 8,
+                            "x8 scratch base clobber for seed {seed:#x}, raw {raw:#06x}: {insn:?}"
+                        );
+                    }
                 }
             }
         }

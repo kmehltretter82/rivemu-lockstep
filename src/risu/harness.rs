@@ -78,6 +78,9 @@ impl RisuCase {
         if suite == Suite::FpEdges {
             fp_edges::configure_initial_state(&mut init_state);
         }
+        if suite == Suite::Compressed {
+            init_state.x[2] = SCRATCH_BASE + 2048;
+        }
         if suite == Suite::Privileged {
             configure_privileged_initial_state(seed, &mut init_state);
         }
