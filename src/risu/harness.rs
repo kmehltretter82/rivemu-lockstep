@@ -8,6 +8,7 @@ use crate::risu::encode::{
     EBREAK, build_supervisor_page_fault_handler, build_supervisor_trap_handler, build_trap_handler,
 };
 use crate::risu::fp_edges;
+use crate::risu::pmp;
 use crate::risu::seed::Rng;
 use crate::risu::suite::{
     Suite, generate_block, generate_compressed_block, generate_privileged_block,
@@ -84,6 +85,9 @@ impl RisuCase {
         if suite == Suite::Privileged {
             configure_privileged_initial_state(seed, &mut init_state);
         }
+        if suite == Suite::Pmp {
+            pmp::configure_case(seed, &mut init_state);
+        }
         let vm_setup = match suite {
             Suite::Sv39 => sv39::configure_case(seed, &mut init_state),
             Suite::Sv48 => sv39::configure_sv48_case(seed, &mut init_state),
@@ -101,6 +105,7 @@ impl RisuCase {
             let insns = match suite {
                 Suite::Privileged => generate_privileged_block(&mut rng, seed, num_insns),
                 Suite::Sv39 | Suite::Sv48 => sv39::generate_block(&mut rng, seed, num_insns),
+                Suite::Pmp => pmp::generate_block(&mut rng, seed, num_insns),
                 _ => generate_block(&mut rng, suite, num_insns),
             };
             let generated_insns = insns.len().checked_sub(1).ok_or_else(|| {
@@ -157,6 +162,7 @@ impl RisuCase {
             Suite::SandboxMem
                 | Suite::Sv39
                 | Suite::Sv48
+                | Suite::Pmp
                 | Suite::Atomics
                 | Suite::Compressed
                 | Suite::All
@@ -453,7 +459,11 @@ impl<C: CosimTarget, R: CosimTarget> RisuHarness<C, R> {
 
     /// Runs an already materialized case identically on candidate and reference.
     pub fn run_case(&mut self, case: &RisuCase) -> Result<Option<BisectReport>, TargetError> {
-        if matches!(case.suite, Suite::Privileged | Suite::Sv39 | Suite::Sv48) && !self.check_csrs {
+        if matches!(
+            case.suite,
+            Suite::Privileged | Suite::Sv39 | Suite::Sv48 | Suite::Pmp
+        ) && !self.check_csrs
+        {
             return Err(TargetError::Protocol(format!(
                 "{} suite requires privileged CSR comparison",
                 case.suite.name()

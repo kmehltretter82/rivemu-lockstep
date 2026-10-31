@@ -31,12 +31,14 @@ pub enum Suite {
     Sv39,
     /// Sv48 4-level translation, high canonical VAs, and delegated page-fault recovery.
     Sv48,
+    /// Physical Memory Protection (`TOR`, `NA4`, `NAPOT`, precedence, and `Zicbom`/`Zicboz`).
+    Pmp,
     /// Directed RV64A AMO and LR/SC semantics over sandboxed scratch memory.
     Atomics,
     /// Legal, sequential RV64C integer and scratch-memory operations.
     Compressed,
     /// Original mixed suites, excluding specialized [`Self::Atomics`], [`Self::FpEdges`],
-    /// [`Self::Privileged`], [`Self::Sv39`], [`Self::Sv48`], and [`Self::Compressed`] suites.
+    /// [`Self::Privileged`], [`Self::Sv39`], [`Self::Sv48`], [`Self::Pmp`], and [`Self::Compressed`] suites.
     All,
 }
 
@@ -56,6 +58,7 @@ impl Suite {
             "priv" | "privileged" | "lower-priv" => Some(Self::Privileged),
             "sv39" | "paging" | "vm" => Some(Self::Sv39),
             "sv48" | "sv48-paging" => Some(Self::Sv48),
+            "pmp" | "pmp-check" => Some(Self::Pmp),
             "atomic" | "atomics" | "rv64a" | "lrsc" => Some(Self::Atomics),
             "compressed" | "rvc" | "c" => Some(Self::Compressed),
             "all" => Some(Self::All),
@@ -78,6 +81,7 @@ impl Suite {
             Self::Privileged => "privileged-traps",
             Self::Sv39 => "sv39-paging",
             Self::Sv48 => "sv48-paging",
+            Self::Pmp => "pmp",
             Self::Atomics => "rv64a-directed",
             Self::Compressed => "rv64c",
             Self::All => "all",
@@ -137,6 +141,9 @@ pub fn generate_block(rng: &mut Rng, suite: Suite, num_insns: usize) -> Vec<u32>
             }
             Suite::Sv39 | Suite::Sv48 => {
                 unreachable!("Sv39/Sv48 instructions use sv39::generate_block")
+            }
+            Suite::Pmp => {
+                unreachable!("PMP instructions use pmp::generate_block")
             }
             Suite::Atomics => {
                 gen_atomic_case(atomic_selector, atomic_slot, &mut out);

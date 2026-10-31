@@ -65,7 +65,7 @@ Usage:
 
 RISU Options:
   --reference <sail|qemu>                       Reference model [default: sail]
-  --suite <alu|control|fence-i|mul|bitmanip|float|fp-edges|mem|csr|privileged|sv39|sv48|atomics|compressed|all>
+  --suite <alu|control|fence-i|mul|bitmanip|float|fp-edges|mem|csr|privileged|sv39|sv48|pmp|atomics|compressed|all>
                                                  Instruction suite [default: all]
   --blocks <N>                                   Number of random blocks [default: 50]
   --insns <K>                                    Instructions per block [default: 32]
@@ -152,10 +152,11 @@ fn main() -> ExitCode {
     };
     while i < args.len() {
         match args[i].as_str() {
-            "--reference" => {
-                let value = value_or_exit!(option_value(&args, &mut i, "--reference"));
+            "--reference" | "--oracle" => {
+                let flag = args[i].as_str();
+                let value = value_or_exit!(option_value(&args, &mut i, flag));
                 let Some(parsed) = RisuReference::parse(value) else {
-                    eprintln!("error: invalid value for --reference ('{value}')");
+                    eprintln!("error: invalid value for {flag} ('{value}')");
                     return ExitCode::from(2);
                 };
                 reference = parsed;
@@ -168,8 +169,9 @@ fn main() -> ExitCode {
                 };
                 suite = s;
             }
-            "--blocks" => {
-                blocks = value_or_exit!(parse_usize_option(&args, &mut i, "--blocks"));
+            "--blocks" | "--seeds" => {
+                let flag = args[i].as_str();
+                blocks = value_or_exit!(parse_usize_option(&args, &mut i, flag));
             }
             "--insns" => {
                 insns = value_or_exit!(parse_usize_option(&args, &mut i, "--insns"));
@@ -255,13 +257,16 @@ fn main() -> ExitCode {
         }
     } else {
         let t0 = Instant::now();
-        let effective_check_csrs =
-            check_csrs || matches!(suite, Suite::Privileged | Suite::Sv39 | Suite::Sv48);
+        let effective_check_csrs = check_csrs
+            || matches!(
+                suite,
+                Suite::Privileged | Suite::Sv39 | Suite::Sv48 | Suite::Pmp
+            );
         let effective_step_check = step_check
             || reference == RisuReference::Sail
             || matches!(
                 suite,
-                Suite::FpEdges | Suite::Privileged | Suite::Sv39 | Suite::Sv48
+                Suite::FpEdges | Suite::Privileged | Suite::Sv39 | Suite::Sv48 | Suite::Pmp
             );
         match reference {
             RisuReference::Qemu => {
@@ -272,7 +277,8 @@ fn main() -> ExitCode {
                         return ExitCode::from(2);
                     }
                 };
-                let qemu = match QemuGdbTarget::spawn_bare(&qemu_bin) {
+                let qemu = match QemuGdbTarget::spawn_bare_with_pmp(&qemu_bin, suite == Suite::Pmp)
+                {
                     Ok(target) => target,
                     Err(error) => {
                         eprintln!("error spawning {}: {error}", qemu_bin.display());

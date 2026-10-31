@@ -146,14 +146,28 @@ impl SailGdbTarget {
             // Model an implementation with no PMP entries so direct S/U-mode
             // execution and page-table walks can reach test RAM. Rivemu's bare
             // lockstep target uses the corresponding non-strict PMP policy.
-            const NO_PMP_CONFIG: &str = concat!(
+            const MANIFEST_NO_PMP_CONFIG: &str = concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/configs/sail-lower-priv-no-pmp.json"
             );
+            const NO_PMP_CONFIG_JSON: &str =
+                include_str!("../../configs/sail-lower-priv-no-pmp.json");
+            let config_path = if Path::new(MANIFEST_NO_PMP_CONFIG).exists() {
+                PathBuf::from(MANIFEST_NO_PMP_CONFIG)
+            } else if Path::new("configs/sail-lower-priv-no-pmp.json").exists() {
+                PathBuf::from("configs/sail-lower-priv-no-pmp.json")
+            } else {
+                let fallback = std::env::temp_dir().join("rivemu-sail-lower-priv-no-pmp.json");
+                if !fallback.exists() {
+                    std::fs::write(&fallback, NO_PMP_CONFIG_JSON)?;
+                }
+                fallback
+            };
+            let config_arg = config_path.to_string_lossy();
             Self::spawn_with_args(
                 sail_bin,
                 &elf_path,
-                &["--config-override", NO_PMP_CONFIG],
+                &["--config-override", config_arg.as_ref()],
                 bootstrap,
             )
         } else {

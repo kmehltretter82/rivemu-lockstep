@@ -21,26 +21,29 @@ pub struct QemuGdbTarget {
     stream: TcpStream,
     /// Whether to read/write privileged trap CSRs (`mstatus`, `mcause`, `mtval`, `mepc`, `satp`) on every state sync.
     pub sync_csrs: bool,
+    pmp_enabled: bool,
 }
 
 impl QemuGdbTarget {
     /// Spawns a bare-metal `qemu-system-riscv64` instance (`-bios none`) for `RISU` lockstep testing.
     pub fn spawn_bare(qemu_bin: &Path) -> Result<Self, TargetError> {
+        Self::spawn_bare_with_pmp(qemu_bin, false)
+    }
+
+    /// Spawns a bare-metal `qemu-system-riscv64` instance (`-bios none`) with configurable PMP support.
+    pub fn spawn_bare_with_pmp(qemu_bin: &Path, pmp_enabled: bool) -> Result<Self, TargetError> {
+        let cpu_arg = if pmp_enabled {
+            "rv64,c=true,h=false,pmp=true,sv57=false,zba=true,zbb=true,zbc=true,zbs=true,zicond=true,zicbom=true,zicboz=true,svinval=true,svpbmt=true,sstc=true"
+        } else {
+            "rv64,c=true,h=false,pmp=false,sv57=false,zba=true,zbb=true,zbc=true,zbs=true,zicond=true,zicbom=true,zicboz=true,svinval=true,svpbmt=true,sstc=true"
+        };
         let mut target = Self::spawn_with_args(
             qemu_bin,
             &[
-                "-machine",
-                "virt",
-                "-cpu",
-                "rv64,c=true,h=false,pmp=false,sv57=false,zba=true,zbb=true,zbc=true,zbs=true,zicond=true,zicbom=true,zicboz=true,svinval=true,svpbmt=true,sstc=true",
-                "-m",
-                "128M",
-                "-smp",
-                "1",
-                "-bios",
-                "none",
+                "-machine", "virt", "-cpu", cpu_arg, "-m", "128M", "-smp", "1", "-bios", "none",
             ],
         )?;
+        target.pmp_enabled = pmp_enabled;
         // Ensure M-mode and mstatus.FS = Dirty (3 << 13) are initialized even when sync_csrs is false.
         let def = ArchState::default();
         target.write_reg(PRIV_GDB_REG, u64::from(def.prv))?;
@@ -95,6 +98,7 @@ impl QemuGdbTarget {
             child,
             stream,
             sync_csrs: true,
+            pmp_enabled: false,
         };
         let _ = target.cmd("qSupported:multiprocess+;xmlRegisters=i386")?;
         Ok(target)
@@ -222,6 +226,12 @@ impl CosimTarget for QemuGdbTarget {
         // Restore privileged CSRs from M-mode before installing the requested
         // final privilege. In particular, S-mode with TVM=1 cannot write satp.
         self.write_reg(PRIV_GDB_REG, 3)?;
+        if self.pmp_enabled {
+            self.write_csr(csr::PMPCFG0, 0)?;
+            for i in 0..4u16 {
+                self.write_csr(csr::PMPADDR0 + i, 0)?;
+            }
+        }
         self.write_csr(csr::MSTATUS, state.mstatus)?;
         self.write_csr(csr::MEPC, state.mepc)?;
         self.write_csr(csr::MCAUSE, state.mcause)?;

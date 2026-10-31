@@ -3,6 +3,7 @@
 pub mod encode;
 mod fp_edges;
 pub mod harness;
+pub(crate) mod pmp;
 pub mod seed;
 pub mod suite;
 pub(crate) mod sv39;
