@@ -23,6 +23,8 @@ pub struct QemuGdbTarget {
     pub sync_csrs: bool,
     pmp_enabled: bool,
     no_ack_mode: bool,
+    priv_gdb_reg: u32,
+    csr_gdb_base: u32,
 }
 
 impl QemuGdbTarget {
@@ -34,9 +36,9 @@ impl QemuGdbTarget {
     /// Spawns a bare-metal `qemu-system-riscv64` instance (`-bios none`) with configurable PMP support.
     pub fn spawn_bare_with_pmp(qemu_bin: &Path, pmp_enabled: bool) -> Result<Self, TargetError> {
         let cpu_arg = if pmp_enabled {
-            "rv64,c=true,h=false,pmp=true,smepmp=true,smstateen=true,sv57=true,svnapot=true,zawrs=true,zabha=true,zacas=true,zba=true,zbb=true,zbc=true,zbkb=true,zbkc=true,zbkx=true,zbs=true,zca=true,zcb=true,zcd=true,zcmop=true,zfa=true,zfbfmin=true,zfh=true,zfhmin=true,zicfilp=true,zicfiss=true,zicond=true,zicbom=true,zicbop=true,zicboz=true,zimop=true,zknd=true,zkne=true,zknh=true,zkr=true,zksed=true,zksh=true,zkt=true,ssdbltrp=true,ssnpm=true,smnpm=true,smmpm=true,x-svukte=true,svinval=true,svpbmt=true,svrsw60t59b=true,svvptc=true,sstc=true"
+            "rv64,c=true,v=true,vlen=256,elen=64,h=false,pmp=true,smepmp=true,smstateen=true,sv57=true,svnapot=true,zawrs=true,zabha=true,zacas=true,zba=true,zbb=true,zbc=true,zbkb=true,zbkc=true,zbkx=true,zbs=true,zca=true,zcb=true,zcd=true,zcmop=true,zfa=true,zfbfmin=true,zfh=true,zfhmin=true,zicfilp=true,zicfiss=true,zicond=true,zicbom=true,zicbop=true,zicboz=true,zimop=true,zknd=true,zkne=true,zknh=true,zkr=true,zksed=true,zksh=true,zkt=true,ssdbltrp=true,ssnpm=true,smnpm=true,smmpm=true,x-svukte=true,svinval=true,svpbmt=true,svrsw60t59b=true,svvptc=true,sstc=true"
         } else {
-            "rv64,c=true,h=false,pmp=false,smstateen=true,sv57=true,svnapot=true,zawrs=true,zabha=true,zacas=true,zba=true,zbb=true,zbc=true,zbkb=true,zbkc=true,zbkx=true,zbs=true,zca=true,zcb=true,zcd=true,zcmop=true,zfa=true,zfbfmin=true,zfh=true,zfhmin=true,zicfilp=true,zicfiss=true,zicond=true,zicbom=true,zicbop=true,zicboz=true,zimop=true,zknd=true,zkne=true,zknh=true,zkr=true,zksed=true,zksh=true,zkt=true,ssdbltrp=true,ssnpm=true,smnpm=true,smmpm=true,x-svukte=true,svinval=true,svpbmt=true,svrsw60t59b=true,svvptc=true,sstc=true"
+            "rv64,c=true,v=true,vlen=256,elen=64,h=false,pmp=false,smstateen=true,sv57=true,svnapot=true,zawrs=true,zabha=true,zacas=true,zba=true,zbb=true,zbc=true,zbkb=true,zbkc=true,zbkx=true,zbs=true,zca=true,zcb=true,zcd=true,zcmop=true,zfa=true,zfbfmin=true,zfh=true,zfhmin=true,zicfilp=true,zicfiss=true,zicond=true,zicbom=true,zicbop=true,zicboz=true,zimop=true,zknd=true,zkne=true,zknh=true,zkr=true,zksed=true,zksh=true,zkt=true,ssdbltrp=true,ssnpm=true,smnpm=true,smmpm=true,x-svukte=true,svinval=true,svpbmt=true,svrsw60t59b=true,svvptc=true,sstc=true"
         };
         let mut target = Self::spawn_with_args(
             qemu_bin,
@@ -47,13 +49,14 @@ impl QemuGdbTarget {
         target.pmp_enabled = pmp_enabled;
         // Ensure M-mode and mstatus.FS = Dirty (3 << 13) are initialized even when sync_csrs is false.
         let def = ArchState::default();
-        target.write_reg(PRIV_GDB_REG, u64::from(def.prv))?;
+        target.write_reg(target.priv_gdb_reg, u64::from(def.prv))?;
         target.write_csr(csr::MSTATUS, def.mstatus)?;
         Ok(target)
     }
 
     /// Spawns `qemu-system-riscv64` with custom machine/boot arguments and connects to its GDB stub.
     pub fn spawn_with_args(qemu_bin: &Path, extra_args: &[&str]) -> Result<Self, TargetError> {
+        let has_v = extra_args.iter().any(|arg| arg.contains("v=true"));
         let port = pick_free_port()?;
         let gdb_arg = format!("tcp:127.0.0.1:{port}");
         let mut cmd = Command::new(qemu_bin);
@@ -101,6 +104,8 @@ impl QemuGdbTarget {
             sync_csrs: true,
             pmp_enabled: false,
             no_ack_mode: false,
+            priv_gdb_reg: if has_v { PRIV_GDB_REG + 32 } else { PRIV_GDB_REG },
+            csr_gdb_base: if has_v { CSR_GDB_BASE + 32 } else { CSR_GDB_BASE },
         };
         let supported = target.cmd("qSupported:multiprocess+;xmlRegisters=i386")?;
         if supported
@@ -163,12 +168,12 @@ impl QemuGdbTarget {
 
     /// Reads a RISC-V CSR by its architectural 12-bit CSR address.
     pub fn read_csr(&mut self, csr_addr: u16) -> Result<u64, TargetError> {
-        self.read_reg(CSR_GDB_BASE + u32::from(csr_addr))
+        self.read_reg(self.csr_gdb_base + u32::from(csr_addr))
     }
 
     /// Writes a RISC-V CSR by its architectural 12-bit CSR address.
     pub fn write_csr(&mut self, csr_addr: u16, val: u64) -> Result<(), TargetError> {
-        self.write_reg(CSR_GDB_BASE + u32::from(csr_addr), val)
+        self.write_reg(self.csr_gdb_base + u32::from(csr_addr), val)
     }
 }
 
@@ -185,7 +190,7 @@ impl CosimTarget for QemuGdbTarget {
         // QEMU GDB memory packets use the current virtual-memory context.
         // Switch to M-mode/Bare before loading physical case images. Restoring
         // a nonzero SATP later also guarantees a TLB flush between cases.
-        self.write_reg(PRIV_GDB_REG, 3)?;
+        self.write_reg(self.priv_gdb_reg, 3)?;
         self.write_csr(csr::SATP, 0)
     }
 
@@ -236,7 +241,7 @@ impl CosimTarget for QemuGdbTarget {
         // previous block changes execution and makes seed replay unreliable.
         // Restore privileged CSRs from M-mode before installing the requested
         // final privilege. In particular, S-mode with TVM=1 cannot write satp.
-        self.write_reg(PRIV_GDB_REG, 3)?;
+        self.write_reg(self.priv_gdb_reg, 3)?;
         if self.pmp_enabled {
             self.write_csr(csr::PMPCFG0, 0)?;
             for i in 0..4u16 {
@@ -275,7 +280,7 @@ impl CosimTarget for QemuGdbTarget {
             self.write_reg(33 + i as u32, reg)?;
         }
         self.write_csr(csr::FCSR, u64::from(state.fcsr & 0xff))?;
-        self.write_reg(PRIV_GDB_REG, u64::from(state.prv))?;
+        self.write_reg(self.priv_gdb_reg, u64::from(state.prv))?;
         Ok(())
     }
 
@@ -301,7 +306,7 @@ impl CosimTarget for QemuGdbTarget {
 
         let (prv, mstatus, mepc, mcause, mtval, sstatus, sepc, scause, stval, stvec, medeleg, satp) =
             if self.sync_csrs {
-                let prv = (self.read_reg(PRIV_GDB_REG)? & 3) as u8;
+                let prv = (self.read_reg(self.priv_gdb_reg)? & 3) as u8;
                 let mstatus = self.read_csr(csr::MSTATUS)?;
                 let mepc = self.read_csr(csr::MEPC)?;
                 let mcause = self.read_csr(csr::MCAUSE)?;
@@ -316,9 +321,9 @@ impl CosimTarget for QemuGdbTarget {
                     // QEMU applies mstatus.TVM to debugger satp reads. Elevate
                     // only for this otherwise-unreadable sample; changing mode
                     // also clears QEMU's hidden LR/SC reservation state.
-                    self.write_reg(PRIV_GDB_REG, 3)?;
+                    self.write_reg(self.priv_gdb_reg, 3)?;
                     let value = self.read_csr(csr::SATP);
-                    let restore = self.write_reg(PRIV_GDB_REG, u64::from(prv));
+                    let restore = self.write_reg(self.priv_gdb_reg, u64::from(prv));
                     match value {
                         Ok(value) => {
                             restore?;

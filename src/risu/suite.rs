@@ -41,8 +41,10 @@ pub enum Suite {
     Atomics,
     /// Legal, sequential RV64C integer and scratch-memory operations.
     Compressed,
+    /// RISC-V Vector Extension (`RVV 1.0` / `V`, `VLEN = 256`, `ELEN = 64`).
+    Vector,
     /// Original mixed suites, excluding specialized [`Self::Atomics`], [`Self::FpEdges`],
-    /// [`Self::Privileged`], [`Self::Sv39`], [`Self::Sv48`], [`Self::Pmp`], [`Self::Cfi`], and [`Self::Compressed`] suites.
+    /// [`Self::Privileged`], [`Self::Sv39`], [`Self::Sv48`], [`Self::Pmp`], [`Self::Cfi`], [`Self::Compressed`], and [`Self::Vector`] suites.
     All,
 }
 
@@ -67,6 +69,7 @@ impl Suite {
             "cfi" | "zicfiss" | "zicfilp" | "pmm" | "svukte" => Some(Self::Cfi),
             "atomic" | "atomics" | "rv64a" | "lrsc" => Some(Self::Atomics),
             "compressed" | "rvc" | "c" => Some(Self::Compressed),
+            "vector" | "rvv" | "v" => Some(Self::Vector),
             "all" => Some(Self::All),
             _ => None,
         }
@@ -92,12 +95,13 @@ impl Suite {
             Self::Cfi => "cfi",
             Self::Atomics => "rv64a-directed",
             Self::Compressed => "rv64c",
+            Self::Vector => "rvv-vector",
             Self::All => "all",
         }
     }
 
-    /// All 17 concrete instruction/architectural suites cycled by `campaign` mode.
-    pub const CAMPAIGN_SUITES: [Self; 17] = [
+    /// All 18 concrete instruction/architectural suites cycled by `campaign` mode.
+    pub const CAMPAIGN_SUITES: [Self; 18] = [
         Self::IntAlu,
         Self::ControlFlow,
         Self::FenceI,
@@ -115,6 +119,7 @@ impl Suite {
         Self::Cfi,
         Self::Atomics,
         Self::Compressed,
+        Self::Vector,
     ];
 }
 
@@ -188,6 +193,9 @@ pub fn generate_block(rng: &mut Rng, suite: Suite, num_insns: usize) -> Vec<u32>
             }
             Suite::Compressed => {
                 unreachable!("compressed instructions use generate_compressed_block")
+            }
+            Suite::Vector => {
+                unreachable!("vector instructions use vector::generate_block")
             }
             Suite::All => unreachable!(),
         }

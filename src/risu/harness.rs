@@ -15,6 +15,7 @@ use crate::risu::suite::{
     Suite, generate_block, generate_compressed_block, generate_privileged_block,
 };
 use crate::risu::sv39;
+use crate::risu::vector;
 use crate::target::{QemuGdbTarget, RivemuTarget};
 use crate::{ArchState, CosimTarget, FieldDiff, StopReason, TargetError};
 
@@ -89,6 +90,9 @@ impl RisuCase {
         if suite == Suite::Pmp {
             pmp::configure_case(seed, &mut init_state);
         }
+        if suite == Suite::Vector {
+            vector::configure_case(seed, &mut init_state);
+        }
         let vm_setup = match suite {
             Suite::Sv39 => sv39::configure_case(seed, &mut init_state),
             Suite::Sv48 => sv39::configure_sv48_case(seed, &mut init_state),
@@ -109,6 +113,7 @@ impl RisuCase {
                 Suite::Sv39 | Suite::Sv48 => sv39::generate_block(&mut rng, seed, num_insns),
                 Suite::Pmp => pmp::generate_block(&mut rng, seed, num_insns),
                 Suite::Cfi => cfi::generate_block(&mut rng, seed, num_insns),
+                Suite::Vector => vector::generate_block(&mut rng, seed, num_insns),
                 _ => generate_block(&mut rng, suite, num_insns),
             };
             let generated_insns = insns.len().checked_sub(1).ok_or_else(|| {
@@ -169,6 +174,7 @@ impl RisuCase {
                 | Suite::Cfi
                 | Suite::Atomics
                 | Suite::Compressed
+                | Suite::Vector
                 | Suite::All
         )
     }
@@ -1253,6 +1259,6 @@ mod tests {
         assert!(rust_test.contains("fn regression_rv64c_0x0000000000004321_step_0()"));
         assert!(rust_test.contains("RivemuTarget::new_bare(true)"));
         assert!(rust_test.contains("target.step_one().unwrap();"));
-        assert_eq!(Suite::CAMPAIGN_SUITES.len(), 17);
+        assert_eq!(Suite::CAMPAIGN_SUITES.len(), 18);
     }
 }
