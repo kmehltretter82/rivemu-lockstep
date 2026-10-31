@@ -38,6 +38,11 @@ const CSR_SSP: i32 = 0x011;
 const CSR_SSTATUS: i32 = 0x100;
 const CSR_SENVCFG: i32 = 0x10a;
 const CSR_MENVCFG: i32 = 0x30a;
+const CSR_TDATA1: i32 = 0x7a1;
+const CSR_MCONTEXT: i32 = 0x7a8;
+
+/// `Sdtrig` `mcontrol6` (`type = 6`) header (`0x6000_0000_0000_0000`).
+const MCONTROL6_TYPE: u64 = 6u64 << 60;
 
 const MRET: u32 = 0x3020_0073;
 const SFENCE_VMA_ALL: u32 = 0x1200_0073;
@@ -174,6 +179,10 @@ pub fn configure_case(seed: u64, state: &mut ArchState) -> Vec<u8> {
         Case::ZicfissPagePermAndAmoswap => {
             state.x[10] = RO_PAGE_VA;
         }
+        Case::ZicfissDisabledMopNop => {
+            state.x[21] = MCONTROL6_TYPE;
+            state.x[22] = 0xffff_5a5a;
+        }
         Case::PointerMaskingPmlen7And16 => {
             let tag_shift = if pmm_bits == ENVCFG_PMM_PMLEN_16 { 48 } else { 57 };
             let tag = 0x2au64 << tag_shift;
@@ -196,9 +205,15 @@ pub fn generate_block(rng: &mut Rng, seed: u64, num_insns: usize) -> Vec<u32> {
 
     // 5-instruction M-mode prologue:
     out.push(i_type(0x73, 0, 0b001, 20, CSR_MENVCFG)); // csrw menvcfg, x20
-    out.push(i_type(0x73, 0, 0b001, 21, CSR_SENVCFG)); // csrw senvcfg, x21
-    out.push(i_type(0x73, 0, 0b001, 22, CSR_SSP));     // csrw ssp, x22
-    out.push(SFENCE_VMA_ALL);
+    if case == Case::ZicfissDisabledMopNop {
+        out.push(i_type(0x73, 0, 0b001, 21, CSR_TDATA1));    // csrw tdata1, x21 (mcontrol6 type = 6)
+        out.push(i_type(0x73, 0, 0b001, 22, CSR_MCONTEXT));  // csrw mcontext, x22 (0xffff_5a5a -> 0x1a5a)
+        out.push(i_type(0x73, 19, 0b010, 0, CSR_MCONTEXT));  // csrr x19, mcontext (observe 13-bit WARL 0x1a5a)
+    } else {
+        out.push(i_type(0x73, 0, 0b001, 21, CSR_SENVCFG)); // csrw senvcfg, x21
+        out.push(i_type(0x73, 0, 0b001, 22, CSR_SSP));     // csrw ssp, x22
+        out.push(SFENCE_VMA_ALL);
+    }
     out.push(MRET);
 
     if matches!(

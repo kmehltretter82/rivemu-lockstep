@@ -259,6 +259,7 @@ impl CosimTarget for QemuGdbTarget {
         self.write_csr(csr::MENVCFG, 0)?;
         self.write_csr(csr::SENVCFG, 0)?;
         self.write_csr(csr::SSP, 0)?;
+        self.write_csr(0x7a8, 0)?;
         let mut g_pkt = String::with_capacity(1 + 33 * 16);
         g_pkt.push('G');
         for (i, &reg) in state.x.iter().enumerate() {
