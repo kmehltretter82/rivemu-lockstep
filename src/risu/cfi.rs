@@ -31,9 +31,11 @@ const ENVCFG_SSE: u64 = 1 << 3;
 const ENVCFG_UKTE: u64 = 1 << 8;
 const ENVCFG_PMM_PMLEN_7: u64 = 2 << 32;
 const ENVCFG_PMM_PMLEN_16: u64 = 3 << 32;
+const ENVCFG_DTE: u64 = 1 << 59;
 const ENVCFG_ADUE: u64 = 1 << 61;
 
 const CSR_SSP: i32 = 0x011;
+const CSR_SSTATUS: i32 = 0x100;
 const CSR_SENVCFG: i32 = 0x10a;
 const CSR_MENVCFG: i32 = 0x30a;
 
@@ -150,7 +152,7 @@ pub fn configure_case(seed: u64, state: &mut ArchState) -> Vec<u8> {
         Case::ZicfissPushPopSsrdp
         | Case::ZicfissPopchkMismatchFault
         | Case::ZicfissPagePermAndAmoswap => (ENVCFG_ADUE | ENVCFG_SSE, ENVCFG_SSE),
-        Case::ZicfissDisabledMopNop => (ENVCFG_ADUE, 0),
+        Case::ZicfissDisabledMopNop => (ENVCFG_ADUE | ENVCFG_DTE, 0),
         Case::ZicfilpValidLandingPads | Case::ZicfilpFaultAndSpelpRecovery => {
             state.mstatus |= MSTATUS_MPELP;
             (ENVCFG_ADUE | ENVCFG_LPE, ENVCFG_LPE)
@@ -248,11 +250,16 @@ pub fn generate_block(rng: &mut Rng, seed: u64, num_insns: usize) -> Vec<u32> {
             }
             Case::ZicfissDisabledMopNop => {
                 out.extend_from_slice(&[
-                    SSPUSH_X1,                         // sspush x1 (NOP when SSE=0)
-                    SSPOPCHK_X5,                       // sspopchk x5 (NOP when SSE=0)
-                    ssrdp(12),                         // ssrdp x12 -> writes 0 when SSE=0
-                    ssamoswap_d(13, 1, 9),             // ssamoswap.d -> ILLEGAL_INSN (2) when SSE=0
-                    i_type(0x73, 14, 0b010, 0, CSR_SSP), // csrr x14, ssp -> ILLEGAL_INSN (2) when SSE=0
+                    SSPUSH_X1,                              // sspush x1 (NOP when SSE=0)
+                    SSPOPCHK_X5,                            // sspopchk x5 (NOP when SSE=0)
+                    ssrdp(12),                              // ssrdp x12 -> writes 0 when SSE=0
+                    ssamoswap_d(13, 1, 9),                  // ssamoswap.d -> S-mode ILLEGAL_INSN (2) (sets SDT=1, SRET clears SDT=0)
+                    u_type(0x37, 15, 0x01000),              // lui x15, 0x1000 (0x0100_0000 = status::SDT)
+                    i_type(0x13, 15, 0b110, 15, 2),         // ori x15, x15, 2 (SDT | SIE)
+                    r_type(0x73, 16, 0b010, 15, 0, CSR_SSTATUS as u32), // csrrs x16, sstatus, x15 (sets SDT=1, auto-clears SIE=0)
+                    i_type(0x73, 17, 0b010, 0, CSR_SSTATUS), // csrr x17, sstatus (observe SDT=1, SIE=0)
+                    i_type(0x73, 14, 0b010, 0, CSR_SSP),    // csrr x14, ssp -> Ssdbltrp escalates to M-mode DOUBLE_TRAP (mcause=16)!
+                    r_type(0x73, 18, 0b011, 15, 0, CSR_SSTATUS as u32), // csrrc x18, sstatus, x15 (observe SDT=1 after MRET to S-mode, clear SDT=0)
                 ]);
             }
             Case::ZicfilpValidLandingPads => {

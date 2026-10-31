@@ -4,5 +4,10 @@
       "count": 0,
       "usable_count": 0
     }
+  },
+  "extensions": {
+    "Ssdbltrp": {
+      "supported": true
+    }
   }
 }
