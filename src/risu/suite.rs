@@ -212,7 +212,7 @@ pub fn generate_compressed_block(rng: &mut Rng, num_insns: usize) -> Vec<u16> {
     let mut out = Vec::with_capacity(num_insns);
     let mut sp_offset: i32 = 0;
     while out.len() < num_insns {
-        let insn = match rng.next_u64() % 34 {
+        let insn = match rng.next_u64() % 46 {
             // Give C.ADDI and its architecturally defined hints extra weight.
             0 => encode_ci(0b000, 0, 0),                 // C.NOP
             1 => encode_ci(0b000, 0, nonzero_imm6(rng)), // C.ADDI hint
@@ -249,7 +249,20 @@ pub fn generate_compressed_block(rng: &mut Rng, num_insns: usize) -> Vec<u16> {
             30 => encode_fldsp(rng.pick_fpr(), sp_double_offset(rng)),          // C.FLDSP
             31 => encode_swsp(rng.pick_src_gpr(), sp_word_offset(rng)),         // C.SWSP
             32 => encode_sdsp(rng.pick_src_gpr(), sp_double_offset(rng)),       // C.SDSP
-            _ => encode_fsdsp(rng.pick_fpr(), sp_double_offset(rng)),           // C.FSDSP
+            33 => encode_fsdsp(rng.pick_fpr(), sp_double_offset(rng)),          // C.FSDSP
+            // Zcb compressed loads, stores, unary extensions, and multiply:
+            34 => encode_zcb_byte_mem(false, compact_dest(rng), (rng.next_u64() & 3) as u8), // C.LBU
+            35 => encode_zcb_byte_mem(true, compact_dest(rng), (rng.next_u64() & 3) as u8),  // C.SB
+            36 => encode_zcb_half_mem(0, compact_dest(rng), (rng.next_u64() & 1) as u8),     // C.LHU
+            37 => encode_zcb_half_mem(1, compact_dest(rng), (rng.next_u64() & 1) as u8),     // C.LH
+            38 => encode_zcb_half_mem(2, compact_dest(rng), (rng.next_u64() & 1) as u8),     // C.SH
+            39 => encode_ca(1, 0b10, compact_dest(rng), compact_src(rng)),                   // C.MUL
+            40 => encode_ca(1, 0b11, compact_dest(rng), 0b000),                              // C.ZEXT.B
+            41 => encode_ca(1, 0b11, compact_dest(rng), 0b001),                              // C.SEXT.B
+            42 => encode_ca(1, 0b11, compact_dest(rng), 0b010),                              // C.ZEXT.H
+            43 => encode_ca(1, 0b11, compact_dest(rng), 0b011),                              // C.SEXT.H
+            44 => encode_ca(1, 0b11, compact_dest(rng), 0b100),                              // C.ZEXT.W
+            _ => encode_ca(1, 0b11, compact_dest(rng), 0b101),                               // C.NOT
         };
         out.push(insn);
     }
@@ -456,6 +469,28 @@ fn encode_compact_mem(funct3: u16, reg_prime: u8, offset: u16) -> u16 {
         (((offset >> 3) & 0x7) << 10) | (((offset >> 6) & 0x3) << 5)
     };
     (funct3 << 13) | offset_bits | (u16::from(reg_prime) << 2)
+}
+
+fn encode_zcb_byte_mem(is_store: bool, reg_prime: u8, uimm2: u8) -> u16 {
+    debug_assert!(reg_prime > 0 && reg_prime < 8 && uimm2 < 4);
+    let sub = if is_store { 0b010u16 } else { 0b000u16 };
+    let uimm_bits = (u16::from(uimm2 & 1) << 6) | (u16::from((uimm2 >> 1) & 1) << 5);
+    (0b100 << 13) | (sub << 10) | uimm_bits | (u16::from(reg_prime) << 2)
+}
+
+fn encode_zcb_half_mem(kind: u8, reg_prime: u8, uimm_bit1: u8) -> u16 {
+    debug_assert!(reg_prime > 0 && reg_prime < 8 && uimm_bit1 < 2);
+    // kind: 0 = C.LHU (sub=0b001, bit6=0), 1 = C.LH (sub=0b001, bit6=1), 2 = C.SH (sub=0b011, bit6=0)
+    let (sub, bit6) = match kind {
+        0 => (0b001u16, 0u16),
+        1 => (0b001u16, 1u16),
+        _ => (0b011u16, 0u16),
+    };
+    (0b100 << 13)
+        | (sub << 10)
+        | (bit6 << 6)
+        | (u16::from(uimm_bit1 & 1) << 5)
+        | (u16::from(reg_prime) << 2)
 }
 
 fn gen_int_alu(rng: &mut Rng) -> u32 {
@@ -1470,6 +1505,7 @@ mod tests {
                             | Op::Srli
                             | Op::Srai
                             | Op::Andi
+                            | Op::Xori
                             | Op::Sub
                             | Op::Xor
                             | Op::Or
@@ -1478,9 +1514,19 @@ mod tests {
                             | Op::Addw
                             | Op::Slli
                             | Op::Add
+                            | Op::Mul
+                            | Op::SextB
+                            | Op::SextH
+                            | Op::ZextH
+                            | Op::AddUw
+                            | Op::Lbu
+                            | Op::Lhu
+                            | Op::Lh
                             | Op::Lw
                             | Op::Ld
                             | Op::Fload
+                            | Op::Sb
+                            | Op::Sh
                             | Op::Sw
                             | Op::Sd
                             | Op::Fstore
@@ -1489,8 +1535,13 @@ mod tests {
                 );
 
                 match insn.op {
-                    Op::Lw | Op::Ld | Op::Fload => {
-                        let width = if insn.op == Op::Lw { 4 } else { 8 };
+                    Op::Lbu | Op::Lhu | Op::Lh | Op::Lw | Op::Ld | Op::Fload => {
+                        let width = match insn.op {
+                            Op::Lbu => 1,
+                            Op::Lhu | Op::Lh => 2,
+                            Op::Lw => 4,
+                            _ => 8,
+                        };
                         let base = if insn.rs1 == 8 {
                             if insn.op != Op::Fload {
                                 assert!((9..=15).contains(&insn.rd));
@@ -1508,8 +1559,13 @@ mod tests {
                         assert!(base + insn.imm >= 0 && base + insn.imm + width <= SCRATCH_LEN);
                         assert_eq!(insn.imm % width, 0);
                     }
-                    Op::Sw | Op::Sd | Op::Fstore => {
-                        let width = if insn.op == Op::Sw { 4 } else { 8 };
+                    Op::Sb | Op::Sh | Op::Sw | Op::Sd | Op::Fstore => {
+                        let width = match insn.op {
+                            Op::Sb => 1,
+                            Op::Sh => 2,
+                            Op::Sw => 4,
+                            _ => 8,
+                        };
                         let base = if insn.rs1 == 8 {
                             if insn.op != Op::Fstore {
                                 assert!((9..=15).contains(&insn.rs2));
