@@ -34,9 +34,9 @@ impl QemuGdbTarget {
     /// Spawns a bare-metal `qemu-system-riscv64` instance (`-bios none`) with configurable PMP support.
     pub fn spawn_bare_with_pmp(qemu_bin: &Path, pmp_enabled: bool) -> Result<Self, TargetError> {
         let cpu_arg = if pmp_enabled {
-            "rv64,c=true,h=false,pmp=true,sv57=true,svnapot=true,zawrs=true,zabha=true,zacas=true,zba=true,zbb=true,zbc=true,zbs=true,zca=true,zcb=true,zcd=true,zcmop=true,zfa=true,zicfilp=true,zicfiss=true,zicond=true,zicbom=true,zicboz=true,zimop=true,ssnpm=true,smnpm=true,x-svukte=true,svinval=true,svpbmt=true,sstc=true"
+            "rv64,c=true,h=false,pmp=true,smepmp=true,smstateen=true,sv57=true,svnapot=true,zawrs=true,zabha=true,zacas=true,zba=true,zbb=true,zbc=true,zbs=true,zca=true,zcb=true,zcd=true,zcmop=true,zfa=true,zicfilp=true,zicfiss=true,zicond=true,zicbom=true,zicboz=true,zimop=true,ssnpm=true,smnpm=true,x-svukte=true,svinval=true,svpbmt=true,sstc=true"
         } else {
-            "rv64,c=true,h=false,pmp=false,sv57=true,svnapot=true,zawrs=true,zabha=true,zacas=true,zba=true,zbb=true,zbc=true,zbs=true,zca=true,zcb=true,zcd=true,zcmop=true,zfa=true,zicfilp=true,zicfiss=true,zicond=true,zicbom=true,zicboz=true,zimop=true,ssnpm=true,smnpm=true,x-svukte=true,svinval=true,svpbmt=true,sstc=true"
+            "rv64,c=true,h=false,pmp=false,smstateen=true,sv57=true,svnapot=true,zawrs=true,zabha=true,zacas=true,zba=true,zbb=true,zbc=true,zbs=true,zca=true,zcb=true,zcd=true,zcmop=true,zfa=true,zicfilp=true,zicfiss=true,zicond=true,zicbom=true,zicboz=true,zimop=true,ssnpm=true,smnpm=true,x-svukte=true,svinval=true,svpbmt=true,sstc=true"
         };
         let mut target = Self::spawn_with_args(
             qemu_bin,
@@ -641,5 +641,145 @@ mod tests {
         assert_eq!(post_p2.pc, trap_base);
         assert_eq!(post_p2.mcause, 2);
         assert_eq!(post_p2.mtval, 0x00d0_0073);
+    }
+
+    #[test]
+    fn smepmp_and_smstateen_match_qemu_in_lockstep() {
+        let local_qemu =
+            "/Users/kmehltretter/codex/linux-work/qemu/build-d7314928-riscv64/qemu-system-riscv64";
+        let qemu_bin = if std::path::Path::new(local_qemu).exists() {
+            local_qemu
+        } else {
+            "qemu-system-riscv64"
+        };
+        let Ok(mut qemu) = QemuGdbTarget::spawn_bare_with_pmp(Path::new(qemu_bin), true) else {
+            return;
+        };
+        let mut rivemu = crate::target::RivemuTarget::new_bare(true).unwrap();
+
+        let code_base = 0x8000_0000u64;
+        let scode_base = 0x8000_4000u64;
+        let trap_base = 0x8000_2000u64;
+        let data_base = 0x8001_0000u64;
+
+        // M-mode code at 0x8000_0000:
+        //   0x00: csrw mstateen0, x20        (0x30ca_1073)
+        //   0x04: csrr x21, mstateen0        (0x30c0_2a_f3)
+        //   0x08: csrw mseccfg, x22          (0x747b_1073) -> set RLB=1 (4)
+        //   0x0c: csrw pmpaddr0, x23         (0x3b0b_9073) -> 0x8000_4000 >> 2 (covers code_base & trap_base)
+        //   0x10: csrw pmpaddr1, x24         (0x3b1c_1073) -> 0x8000_8000 >> 2 (covers scode_base)
+        //   0x14: csrw pmpaddr2, x25         (0x3b2c_9073) -> 0x8001_0000 >> 2 (bottom of data_base)
+        //   0x18: csrw pmpaddr3, x26         (0x3b3d_1073) -> 0x8001_4000 >> 2 (covers data_base)
+        //   0x1c: csrw pmpcfg0, x27          (0x3a0d_9073) -> lock entry 0 first
+        //   0x20: csrw pmpcfg0, x28          (0x3a0e_1073) -> modify locked entry 0 via RLB=1 & stage shared entry 3
+        //   0x24: csrw mseccfg, x29          (0x747e_9073) -> set MML|MMWP (3), clearing RLB
+        //   0x28: ld   x11, 0(x10)           (0x0005_3583) -> M-mode load from shared data_base succeeds
+        //   0x2c: sd   x12, 0(x10)           (0x00c5_3023) -> M-mode store to shared data_base succeeds
+        //   0x30: mret                       (0x3020_0073) -> drop to S-mode at scode_base
+        let m_insns: [u32; 13] = [
+            0x30ca_1073,
+            0x30c0_2af3,
+            0x747b_1073,
+            0x3b0b_9073,
+            0x3b1c_1073,
+            0x3b2c_9073,
+            0x3b3d_1073,
+            0x3a0d_9073,
+            0x3a0e_1073,
+            0x747e_9073,
+            0x0005_3583,
+            0x00c5_3023,
+            0x3020_0073,
+        ];
+        // S-mode code at 0x8000_4000:
+        //   0x00: csrr x13, sstateen0        (0x10c0_26f3) -> succeeds because mstateen0.SE=1
+        //   0x04: csrr x14, senvcfg          (0x10a0_2773) -> traps (mcause=2) because mstateen0.ENVCFG=0!
+        //   0x08: ld   x15, 0(x10)           (0x0005_3783) -> S-mode load from shared data_base succeeds
+        //   0x0c: sd   x12, 0(x10)           (0x00c5_3023) -> S-mode store to shared data_base traps (mcause=7)!
+        //   0x10: ebreak                     (0x0010_0073)
+        let s_insns: [u32; 5] = [
+            0x10c0_26f3,
+            0x10a0_2773,
+            0x0005_3783,
+            0x00c5_3023,
+            0x0010_0073,
+        ];
+        let mut m_bytes = Vec::with_capacity(m_insns.len() * 4);
+        for w in m_insns {
+            m_bytes.extend_from_slice(&w.to_le_bytes());
+        }
+        let mut s_bytes = Vec::with_capacity(s_insns.len() * 4);
+        for w in s_insns {
+            s_bytes.extend_from_slice(&w.to_le_bytes());
+        }
+        let trap_bytes = crate::risu::encode::build_trap_handler();
+
+        let mut init = ArchState::default();
+        init.pc = code_base;
+        init.prv = 3; // M-mode
+        init.mepc = scode_base;
+        init.mstatus |= 1 << 11; // MPP = S
+        init.x[10] = data_base;
+        init.x[12] = 0xfeed_face_cafe_beef;
+        init.x[20] = 1u64 << 63; // mstateen0 = SE (bit 63), ENVCFG = 0 (bit 62)
+        init.x[22] = 4; // mseccfg = RLB
+        init.x[23] = scode_base >> 2;
+        init.x[24] = (scode_base + 0x4000) >> 2;
+        init.x[25] = data_base >> 2;
+        init.x[26] = (data_base + 0x4000) >> 2;
+        init.x[27] = 0x00_00_00_8d; // entry 0 locked TOR R|X
+        // Entry 0: L=1, TOR, X-only (0x8c) [0, 0x8000_4000)
+        // Entry 1: L=0, TOR, X-only (0x0c) [0x8000_4000, 0x8000_8000) -> S-mode X-only under MML
+        // Entry 2: OFF (0x00)
+        // Entry 3: L=0, TOR, W=1, X=0 (0x0a) [0x8001_0000, 0x8001_4000) -> Shared M=RW, S/U=R under MML
+        init.x[28] = 0x0a_00_0c_8c;
+        init.x[29] = 3; // mseccfg = MML | MMWP
+
+        for target in [&mut rivemu as &mut dyn CosimTarget, &mut qemu] {
+            target.load_ram(code_base, &m_bytes).unwrap();
+            target.load_ram(scode_base, &s_bytes).unwrap();
+            target.load_ram(trap_base, &trap_bytes).unwrap();
+            target.load_ram(data_base, &[0x42u8; 64]).unwrap();
+            target.set_state(&init).unwrap();
+            target.set_trap_vector(trap_base).unwrap();
+        }
+
+        // Step through M-mode setup + MRET (13 steps), sstateen0 read (1 step), and senvcfg trap (1 step) = 15 steps:
+        for step in 0..15 {
+            rivemu.step_one().unwrap();
+            qemu.step_one().unwrap();
+            let r_state = rivemu.get_state().unwrap();
+            let q_state = qemu.get_state().unwrap();
+            let diffs = r_state.diff(&q_state, true);
+            assert!(
+                diffs.is_empty(),
+                "step {step} at pc={:#x} diverged: {diffs:?}",
+                r_state.pc
+            );
+        }
+        // At step 15, S-mode `csrr x14, senvcfg` trapped to trap_base with mcause = 2 (ILLEGAL_INSN)!
+        let trap1 = rivemu.get_state().unwrap();
+        assert_eq!(trap1.pc, trap_base);
+        assert_eq!(trap1.mcause, 2);
+        assert_eq!(trap1.mepc, scode_base + 4);
+
+        // Step through the 8-instruction M-mode trap handler (which advances mepc to scode_base + 8 and executes mret)
+        // followed by `ld x15, 0(x10)` and `sd x12, 0(x10)` in S-mode (8 + 2 = 10 steps):
+        for step in 0..10 {
+            rivemu.step_one().unwrap();
+            qemu.step_one().unwrap();
+            let r_state = rivemu.get_state().unwrap();
+            let q_state = qemu.get_state().unwrap();
+            let diffs = r_state.diff(&q_state, true);
+            assert!(
+                diffs.is_empty(),
+                "S-mode shared data step {step} diverged: {diffs:?}"
+            );
+        }
+        let trap2 = rivemu.get_state().unwrap();
+        assert_eq!(trap2.x[15], 0xfeed_face_cafe_beef); // S-mode load observed M-mode's store!
+        assert_eq!(trap2.pc, trap_base);
+        assert_eq!(trap2.mcause, 7); // S-mode store to shared region faulted with STORE_ACCESS!
+        assert_eq!(trap2.mtval, data_base);
     }
 }

@@ -1105,13 +1105,14 @@ fn gen_atomic_case(selector: usize, slot: usize, out: &mut Vec<u32>) {
 }
 
 fn gen_csr_trap(rng: &mut Rng, out: &mut Vec<u32>) {
-    match rng.next_u64() % 23 {
+    match rng.next_u64() % 24 {
         0 => gen_csr_alias_set(out),
         1 => gen_csr_alias_clear(out),
         2 => gen_csr_immediate_forms(out),
         3 => gen_csr_write_suppression(out),
         4 => gen_read_only_csr_traps(out),
-        selector => gen_csr_single(rng, selector - 5, out),
+        5 => gen_smstateen_csrs(rng, out),
+        selector => gen_csr_single(rng, selector - 6, out),
     }
 }
 
@@ -1187,6 +1188,17 @@ fn gen_read_only_csr_traps(out: &mut Vec<u32>) {
         i_type(0x73, 31, 0b001, 0, 0xf14), // csrrw  x31, mhartid, x0: illegal
         i_type(0x13, 31, 0b000, 0, 0x05a),
         i_type(0x73, 31, 0b101, 0, 0xf14), // csrrwi x31, mhartid, 0: illegal
+    ]);
+}
+
+fn gen_smstateen_csrs(rng: &mut Rng, out: &mut Vec<u32>) {
+    let rs1 = rng.pick_src_gpr();
+    out.extend([
+        i_type(0x73, 0, 0b001, rs1, 0x30c),  // csrw  mstateen0, rs1 (WARL mask 0xc000_0000_0000_0000)
+        i_type(0x73, 29, 0b010, 0, 0x30c),   // csrr  x29, mstateen0
+        i_type(0x73, 30, 0b010, 0, 0x10c),   // csrr  x30, sstateen0 (read-only 0)
+        i_type(0x13, 31, 0b000, 0, -1),      // addi  x31, x0, -1
+        i_type(0x73, 0, 0b001, 31, 0x30c),   // csrw  mstateen0, x31 (restore SE0 | ENVCFG)
     ]);
 }
 
