@@ -437,10 +437,11 @@ fn emit_divergence_report(report: &BisectReport, emit_repro: Option<&Path>) {
     print!("{report}");
     let rust_test = report.minimized_rust_test();
     println!("\n--- Minimized Rust Regression Test ---\n{rust_test}");
-    if let Some(path) = emit_repro
-        && let Err(error) = std::fs::write(path, &rust_test)
-    {
-        eprintln!("warning: could not write reproducer to {}: {error}", path.display());
+    #[allow(clippy::collapsible_if)]
+    if let Some(path) = emit_repro {
+        if let Err(error) = std::fs::write(path, &rust_test) {
+            eprintln!("warning: could not write reproducer to {}: {error}", path.display());
+        }
     }
 }
 
@@ -478,9 +479,7 @@ fn run_campaign(
         for _ in 0..workers {
             scope.spawn(|| {
                 while !stop.load(Ordering::Relaxed) {
-                    if let Some(limit) = deadline
-                        && Instant::now() >= limit
-                    {
+                    if deadline.is_some_and(|limit| Instant::now() >= limit) {
                         break;
                     }
                     let block = next_block.fetch_add(1, Ordering::Relaxed);
