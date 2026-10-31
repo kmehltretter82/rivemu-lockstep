@@ -68,7 +68,7 @@ Usage:
 
 RISU / Campaign Options:
   --reference <sail|qemu>                       Reference model [default: sail]
-  --suite <alu|control|fence-i|mul|bitmanip|float|fp-edges|mem|csr|privileged|sv39|sv48|pmp|atomics|compressed|all>
+  --suite <alu|control|fence-i|mul|bitmanip|float|fp-edges|mem|csr|privileged|sv39|sv48|pmp|cfi|atomics|compressed|all>
                                                  Instruction suite [default: all]
   --blocks <N>                                   Number of random blocks [default: 50]
   --workers <N>                                  Parallel worker threads for campaign mode [default: 2]
@@ -314,13 +314,18 @@ fn main() -> ExitCode {
         let effective_check_csrs = check_csrs
             || matches!(
                 suite,
-                Suite::Privileged | Suite::Sv39 | Suite::Sv48 | Suite::Pmp
+                Suite::Privileged | Suite::Sv39 | Suite::Sv48 | Suite::Pmp | Suite::Cfi
             );
         let effective_step_check = step_check
             || reference == RisuReference::Sail
             || matches!(
                 suite,
-                Suite::FpEdges | Suite::Privileged | Suite::Sv39 | Suite::Sv48 | Suite::Pmp
+                Suite::FpEdges
+                    | Suite::Privileged
+                    | Suite::Sv39
+                    | Suite::Sv48
+                    | Suite::Pmp
+                    | Suite::Cfi
             );
         match reference {
             RisuReference::Qemu => {
@@ -475,9 +480,27 @@ fn run_campaign(
         std::slice::from_ref(&suite)
     };
 
+    println!(
+        "START: campaign reference={} suite={} workers={} max_blocks={} insns_per_block={} start_seed={start_seed:#x}",
+        reference.name(),
+        suite.name(),
+        workers,
+        max_blocks,
+        insns
+    );
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+
+    let progress_interval = match reference {
+        RisuReference::Sail => 10usize,
+        RisuReference::Qemu => 25usize,
+    };
+
     std::thread::scope(|scope| {
         for _ in 0..workers {
             scope.spawn(|| {
+                let mut cached_qemu_no_pmp: Option<RisuHarness> = None;
+                let mut cached_qemu_pmp: Option<RisuHarness> = None;
+
                 while !stop.load(Ordering::Relaxed) {
                     if deadline.is_some_and(|limit| Instant::now() >= limit) {
                         break;
@@ -491,7 +514,11 @@ fn run_campaign(
                     let effective_check_csrs = check_csrs
                         || matches!(
                             active_suite,
-                            Suite::Privileged | Suite::Sv39 | Suite::Sv48 | Suite::Pmp
+                            Suite::Privileged
+                                | Suite::Sv39
+                                | Suite::Sv48
+                                | Suite::Pmp
+                                | Suite::Cfi
                         );
                     let effective_step_check = step_check
                         || reference == RisuReference::Sail
@@ -502,23 +529,46 @@ fn run_campaign(
                                 | Suite::Sv39
                                 | Suite::Sv48
                                 | Suite::Pmp
+                                | Suite::Cfi
                         );
 
                     let outcome = match RisuCase::generate(active_suite, seed, insns) {
                         Ok(case) => match reference {
                             RisuReference::Qemu => {
-                                RivemuTarget::new_bare(strict).and_then(|rivemu| {
-                                    QemuGdbTarget::spawn_bare_with_pmp(
-                                        qemu_bin,
-                                        active_suite == Suite::Pmp,
-                                    )
-                                    .and_then(|qemu| {
-                                        RisuHarness::new(rivemu, qemu, effective_check_csrs)
-                                    })
-                                    .and_then(|mut harness| {
-                                        harness.set_step_check(effective_step_check);
-                                        harness.run_case(&case)
-                                    })
+                                let pmp_needed = active_suite == Suite::Pmp;
+                                let slot = if pmp_needed {
+                                    &mut cached_qemu_pmp
+                                } else {
+                                    &mut cached_qemu_no_pmp
+                                };
+                                if slot.is_none() {
+                                    let created = RivemuTarget::new_bare(strict)
+                                        .and_then(|rivemu| {
+                                            QemuGdbTarget::spawn_bare_with_pmp(qemu_bin, pmp_needed)
+                                                .and_then(|qemu| {
+                                                    RisuHarness::new(
+                                                        rivemu,
+                                                        qemu,
+                                                        effective_check_csrs,
+                                                    )
+                                                })
+                                        });
+                                    match created {
+                                        Ok(h) => {
+                                            *slot = Some(h);
+                                            Ok(())
+                                        }
+                                        Err(e) => Err(e),
+                                    }
+                                } else {
+                                    Ok(())
+                                }
+                                .and_then(|()| {
+                                    let harness = slot.as_mut().unwrap();
+                                    harness.check_csrs = effective_check_csrs;
+                                    harness.reference.sync_csrs = effective_check_csrs;
+                                    harness.set_step_check(effective_step_check);
+                                    harness.run_case(&case)
                                 })
                             }
                             RisuReference::Sail => {
@@ -543,7 +593,18 @@ fn run_campaign(
 
                     match outcome {
                         Ok(None) => {
-                            completed_blocks.fetch_add(1, Ordering::Relaxed);
+                            let done = completed_blocks.fetch_add(1, Ordering::Relaxed) + 1;
+                            if done % progress_interval == 0 {
+                                println!(
+                                    "PROGRESS: reference={} suite={} completed_blocks={} insns_tested={} latest_seed={seed:#x} elapsed={:.2?}",
+                                    reference.name(),
+                                    suite.name(),
+                                    done,
+                                    done * insns,
+                                    t0.elapsed()
+                                );
+                                let _ = std::io::Write::flush(&mut std::io::stdout());
+                            }
                         }
                         Ok(Some(report)) => {
                             stop.store(true, Ordering::Relaxed);

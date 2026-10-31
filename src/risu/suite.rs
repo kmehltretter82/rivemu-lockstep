@@ -33,12 +33,14 @@ pub enum Suite {
     Sv48,
     /// Physical Memory Protection (`TOR`, `NA4`, `NAPOT`, precedence, and `Zicbom`/`Zicboz`).
     Pmp,
+    /// RVA23 Control-Flow Integrity (`Zicfiss`, `Zicfilp`), Pointer Masking (`Ssnpm`, `Smnpm`), and `Svukte`.
+    Cfi,
     /// Directed RV64A AMO and LR/SC semantics over sandboxed scratch memory.
     Atomics,
     /// Legal, sequential RV64C integer and scratch-memory operations.
     Compressed,
     /// Original mixed suites, excluding specialized [`Self::Atomics`], [`Self::FpEdges`],
-    /// [`Self::Privileged`], [`Self::Sv39`], [`Self::Sv48`], [`Self::Pmp`], and [`Self::Compressed`] suites.
+    /// [`Self::Privileged`], [`Self::Sv39`], [`Self::Sv48`], [`Self::Pmp`], [`Self::Cfi`], and [`Self::Compressed`] suites.
     All,
 }
 
@@ -59,6 +61,7 @@ impl Suite {
             "sv39" | "paging" | "vm" => Some(Self::Sv39),
             "sv48" | "sv48-paging" => Some(Self::Sv48),
             "pmp" | "pmp-check" => Some(Self::Pmp),
+            "cfi" | "zicfiss" | "zicfilp" | "pmm" | "svukte" => Some(Self::Cfi),
             "atomic" | "atomics" | "rv64a" | "lrsc" => Some(Self::Atomics),
             "compressed" | "rvc" | "c" => Some(Self::Compressed),
             "all" => Some(Self::All),
@@ -82,14 +85,15 @@ impl Suite {
             Self::Sv39 => "sv39-paging",
             Self::Sv48 => "sv48-paging",
             Self::Pmp => "pmp",
+            Self::Cfi => "cfi",
             Self::Atomics => "rv64a-directed",
             Self::Compressed => "rv64c",
             Self::All => "all",
         }
     }
 
-    /// All 15 concrete instruction/architectural suites cycled by `campaign` mode.
-    pub const CAMPAIGN_SUITES: [Self; 15] = [
+    /// All 16 concrete instruction/architectural suites cycled by `campaign` mode.
+    pub const CAMPAIGN_SUITES: [Self; 16] = [
         Self::IntAlu,
         Self::ControlFlow,
         Self::FenceI,
@@ -103,6 +107,7 @@ impl Suite {
         Self::Sv39,
         Self::Sv48,
         Self::Pmp,
+        Self::Cfi,
         Self::Atomics,
         Self::Compressed,
     ];
@@ -166,6 +171,9 @@ pub fn generate_block(rng: &mut Rng, suite: Suite, num_insns: usize) -> Vec<u32>
             Suite::Pmp => {
                 unreachable!("PMP instructions use pmp::generate_block")
             }
+            Suite::Cfi => {
+                unreachable!("CFI instructions use cfi::generate_block")
+            }
             Suite::Atomics => {
                 gen_atomic_case(atomic_selector, atomic_slot, &mut out);
                 atomic_slot += 1;
@@ -212,7 +220,7 @@ pub fn generate_compressed_block(rng: &mut Rng, num_insns: usize) -> Vec<u16> {
     let mut out = Vec::with_capacity(num_insns);
     let mut sp_offset: i32 = 0;
     while out.len() < num_insns {
-        let insn = match rng.next_u64() % 46 {
+        let insn = match rng.next_u64() % 47 {
             // Give C.ADDI and its architecturally defined hints extra weight.
             0 => encode_ci(0b000, 0, 0),                 // C.NOP
             1 => encode_ci(0b000, 0, nonzero_imm6(rng)), // C.ADDI hint
@@ -262,7 +270,13 @@ pub fn generate_compressed_block(rng: &mut Rng, num_insns: usize) -> Vec<u16> {
             42 => encode_ca(1, 0b11, compact_dest(rng), 0b010),                              // C.ZEXT.H
             43 => encode_ca(1, 0b11, compact_dest(rng), 0b011),                              // C.SEXT.H
             44 => encode_ca(1, 0b11, compact_dest(rng), 0b100),                              // C.ZEXT.W
-            _ => encode_ca(1, 0b11, compact_dest(rng), 0b101),                               // C.NOT
+            45 => encode_ca(1, 0b11, compact_dest(rng), 0b101),                              // C.NOT
+            // Zcmop compressed may-be-operations (C.MOP.3,5,7,9,11,13,15; exclude 1 and 5 which are C.SSPUSH/C.SSPOPCHK):
+            _ => {
+                const ZCMOP_RD: [u8; 6] = [3, 7, 9, 11, 13, 15];
+                let rd = ZCMOP_RD[(rng.next_u64() % 6) as usize];
+                0x6001 | (u16::from(rd) << 7)
+            }
         };
         out.push(insn);
     }
@@ -501,7 +515,7 @@ fn gen_int_alu(rng: &mut Rng) -> u32 {
     let shamt6 = (rng.next_u64() & 63) as i32;
     let shamt5 = (rng.next_u64() & 31) as i32;
 
-    match rng.next_u64() % 29 {
+    match rng.next_u64() % 31 {
         0 => r_type(0x33, rd, 0b000, rs1, rs2, 0x00),  // add
         1 => r_type(0x33, rd, 0b000, rs1, rs2, 0x20),  // sub
         2 => r_type(0x33, rd, 0b001, rs1, rs2, 0x00),  // sll
@@ -530,7 +544,19 @@ fn gen_int_alu(rng: &mut Rng) -> u32 {
         25 => i_type(0x1b, rd, 0b001, rs1, shamt5),    // slliw
         26 => i_type(0x1b, rd, 0b101, rs1, shamt5),    // srliw
         27 => i_type(0x1b, rd, 0b101, rs1, 0x400 | shamt5), // sraiw
-        _ => u_type(0x37, rd, (rng.edge_u64() & 0xfffff) as u32), // lui
+        28 => u_type(0x37, rd, (rng.edge_u64() & 0xfffff) as u32), // lui
+        29 => {
+            // Zimop MOP.R.0..27 (exclude 28 which is Zicfiss SSRDP/SSPOPCHK):
+            let n = (rng.next_u64() % 28) as u32;
+            let csr = 0x81c | ((n & 0x10) << 6) | ((n & 0x0c) << 4) | (n & 0x03);
+            (csr << 20) | (u32::from(rs1) << 15) | (0b100 << 12) | (u32::from(rd) << 7) | 0x73
+        }
+        _ => {
+            // Zimop MOP.RR.0..6 (exclude 7 which is Zicfiss SSPUSH):
+            let n = (rng.next_u64() % 7) as u32;
+            let f7 = 0x41 | ((n & 0x4) << 3) | ((n & 0x3) << 1);
+            r_type(0x73, rd, 0b100, rs1, rs2, f7)
+        }
     }
 }
 
@@ -1530,6 +1556,7 @@ mod tests {
                             | Op::Sw
                             | Op::Sd
                             | Op::Fstore
+                            | Op::Mop
                     ),
                     "unexpected operation for seed {seed:#x}, raw {raw:#06x}: {insn:?}"
                 );

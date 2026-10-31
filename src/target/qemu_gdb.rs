@@ -22,6 +22,7 @@ pub struct QemuGdbTarget {
     /// Whether to read/write privileged trap CSRs (`mstatus`, `mcause`, `mtval`, `mepc`, `satp`) on every state sync.
     pub sync_csrs: bool,
     pmp_enabled: bool,
+    no_ack_mode: bool,
 }
 
 impl QemuGdbTarget {
@@ -33,9 +34,9 @@ impl QemuGdbTarget {
     /// Spawns a bare-metal `qemu-system-riscv64` instance (`-bios none`) with configurable PMP support.
     pub fn spawn_bare_with_pmp(qemu_bin: &Path, pmp_enabled: bool) -> Result<Self, TargetError> {
         let cpu_arg = if pmp_enabled {
-            "rv64,c=true,h=false,pmp=true,sv57=false,zabha=true,zacas=true,zba=true,zbb=true,zbc=true,zbs=true,zca=true,zcb=true,zcd=true,zfa=true,zicond=true,zicbom=true,zicboz=true,svinval=true,svpbmt=true,sstc=true"
+            "rv64,c=true,h=false,pmp=true,sv57=false,zabha=true,zacas=true,zba=true,zbb=true,zbc=true,zbs=true,zca=true,zcb=true,zcd=true,zcmop=true,zfa=true,zicfilp=true,zicfiss=true,zicond=true,zicbom=true,zicboz=true,zimop=true,ssnpm=true,smnpm=true,x-svukte=true,svinval=true,svpbmt=true,sstc=true"
         } else {
-            "rv64,c=true,h=false,pmp=false,sv57=false,zabha=true,zacas=true,zba=true,zbb=true,zbc=true,zbs=true,zca=true,zcb=true,zcd=true,zfa=true,zicond=true,zicbom=true,zicboz=true,svinval=true,svpbmt=true,sstc=true"
+            "rv64,c=true,h=false,pmp=false,sv57=false,zabha=true,zacas=true,zba=true,zbb=true,zbc=true,zbs=true,zca=true,zcb=true,zcd=true,zcmop=true,zfa=true,zicfilp=true,zicfiss=true,zicond=true,zicbom=true,zicboz=true,zimop=true,ssnpm=true,smnpm=true,x-svukte=true,svinval=true,svpbmt=true,sstc=true"
         };
         let mut target = Self::spawn_with_args(
             qemu_bin,
@@ -99,8 +100,16 @@ impl QemuGdbTarget {
             stream,
             sync_csrs: true,
             pmp_enabled: false,
+            no_ack_mode: false,
         };
-        let _ = target.cmd("qSupported:multiprocess+;xmlRegisters=i386")?;
+        let supported = target.cmd("qSupported:multiprocess+;xmlRegisters=i386")?;
+        if supported
+            .split(';')
+            .any(|feature| feature == "QStartNoAckMode+")
+            && target.cmd("QStartNoAckMode")? == "OK"
+        {
+            target.no_ack_mode = true;
+        }
         Ok(target)
     }
 
@@ -128,7 +137,9 @@ impl QemuGdbTarget {
         }
         let mut chk = [0u8; 2];
         self.stream.read_exact(&mut chk)?;
-        self.stream.write_all(b"+")?;
+        if !self.no_ack_mode {
+            self.stream.write_all(b"+")?;
+        }
         String::from_utf8(body).map_err(|e| TargetError::Protocol(e.to_string()))
     }
 
@@ -245,7 +256,9 @@ impl CosimTarget for QemuGdbTarget {
         self.write_csr(csr::MEDELEG, state.medeleg)?;
         self.write_csr(csr::MIDELEG, 0)?;
         self.write_csr(csr::STVEC, state.stvec)?;
+        self.write_csr(csr::MENVCFG, 0)?;
         self.write_csr(csr::SENVCFG, 0)?;
+        self.write_csr(csr::SSP, 0)?;
         let mut g_pkt = String::with_capacity(1 + 33 * 16);
         g_pkt.push('G');
         for (i, &reg) in state.x.iter().enumerate() {
@@ -445,5 +458,96 @@ mod tests {
             decode_le_hex_u64("efcdab8967452301").unwrap(),
             0x0123_4567_89ab_cdef
         );
+    }
+
+    #[test]
+    fn zicfilp_and_pointer_masking_match_qemu_in_lockstep() {
+        let local_qemu =
+            "/Users/kmehltretter/codex/linux-work/qemu/build-d7314928-riscv64/qemu-system-riscv64";
+        let qemu_bin = if std::path::Path::new(local_qemu).exists() {
+            local_qemu
+        } else {
+            "qemu-system-riscv64"
+        };
+        let Ok(mut qemu) = QemuGdbTarget::spawn_bare_with_pmp(Path::new(qemu_bin), false) else {
+            return;
+        };
+        let mut rivemu = crate::target::RivemuTarget::new_bare(true).unwrap();
+
+        let code_base = 0x8000_0000u64;
+        let trap_base = 0x8000_2000u64;
+        let insns: [u32; 25] = [
+            0x0000_42b7, // 0x00: lui  t0, 0x4
+            0x0132_9293, // 0x04: slli t0, t0, 19
+            0x0042_e293, // 0x08: ori  t0, t0, 4
+            0x30a2_9073, // 0x0c: csrw menvcfg, t0
+            0x3020_0073, // 0x10: mret
+            0x0000_0017, // 0x14: lpad 0 (auipc x0, 0)
+            0x0210_0313, // 0x18: li   t1, 0x21
+            0x0393_1313, // 0x1c: slli t1, t1, 57
+            0x0083_6333, // 0x20: or   t1, t1, s0
+            0x05a0_0393, // 0x24: li   t2, 0x5a
+            0x0073_3023, // 0x28: sd   t2, 0(t1)
+            0x0003_3503, // 0x2c: ld   a0, 0(t1)
+            0x0000_0397, // 0x30: auipc t2, 0
+            0x00c3_8393, // 0x34: addi  t2, t2, 12
+            0x0003_8067, // 0x38: jalr  x0, 0(t2)
+            0x0000_0317, // 0x3c: auipc t1, 0
+            0x0103_0313, // 0x40: addi  t1, t1, 16
+            0x0005_53b7, // 0x44: lui   t2, 0x55 (x7 = 0x55 << 12)
+            0x0003_0067, // 0x48: jalr  x0, 0(t1)
+            0x0005_5017, // 0x4c: lpad  0x55 (auipc x0, 0x55)
+            0x0000_0317, // 0x50: auipc t1, 0
+            0x00c3_0313, // 0x54: addi  t1, t1, 12
+            0x0003_0067, // 0x58: jalr  x0, 0(t1)
+            0x0007_7017, // 0x5c: lpad  0x77 (mismatches x7 -> SW_CHECK!)
+            0x0010_0073, // 0x60: ebreak
+        ];
+        let mut code_bytes = Vec::with_capacity(insns.len() * 4);
+        for word in insns {
+            code_bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        let trap_insns = crate::risu::encode::build_trap_handler();
+        let mut trap_bytes = Vec::with_capacity(trap_insns.len() * 4);
+        for word in trap_insns {
+            trap_bytes.extend_from_slice(&word.to_le_bytes());
+        }
+
+        let mut init = ArchState::default();
+        init.pc = code_base;
+        init.prv = 3;
+        init.x[8] = 0x8001_0000;
+        init.mepc = code_base + 0x14;
+        // MPP = S (1 << 11), MPELP = 1 (1 << 41)
+        init.mstatus = 0x0000_020a_0000_0800;
+
+        for target in [&mut rivemu as &mut dyn CosimTarget, &mut qemu] {
+            target.load_ram(code_base, &code_bytes).unwrap();
+            target.load_ram(trap_base, &trap_bytes).unwrap();
+            target.load_ram(0x8001_0000, &[0u8; 64]).unwrap();
+            target.set_state(&init).unwrap();
+            target.set_trap_vector(trap_base).unwrap();
+        }
+
+        for step in 0..30 {
+            rivemu.step_one().unwrap();
+            qemu.step_one().unwrap();
+            let r_state = rivemu.get_state().unwrap();
+            let q_state = qemu.get_state().unwrap();
+            let diffs = r_state.diff(&q_state, true);
+            assert!(
+                diffs.is_empty(),
+                "step {step} at pc={:#x} diverged: {diffs:?}",
+                r_state.pc
+            );
+            if r_state.pc == trap_base {
+                assert_eq!(r_state.mcause, 18);
+                assert_eq!(r_state.mtval, 2);
+                assert_eq!((r_state.mstatus >> 41) & 1, 1);
+                assert_eq!(r_state.x[10], 0x5a);
+                return;
+            }
+        }
+        panic!("expected SW_CHECK trap at 0x8000_005c");
     }
 }

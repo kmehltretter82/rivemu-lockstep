@@ -111,6 +111,7 @@ pub struct SailGdbTarget {
     bootstrap: SailBootstrap,
     dialect: SailGdbDialect,
     debug_v1: bool,
+    no_ack_mode: bool,
     memory_chunk: usize,
     owned_elf: Option<PathBuf>,
 }
@@ -141,8 +142,10 @@ impl SailGdbTarget {
         let bootstrap_insns = u32::try_from(bootstrap_code.len() / 4)
             .expect("Sail bootstrap instruction count fits u32");
         let bootstrap = SailBootstrap::new(SAIL_BOOTSTRAP_BASE, bootstrap_insns, TRAP_BASE);
-        let spawn_result = if matches!(case.suite(), Suite::Privileged | Suite::Sv39 | Suite::Sv48)
-        {
+        let spawn_result = if matches!(
+            case.suite(),
+            Suite::Privileged | Suite::Sv39 | Suite::Sv48 | Suite::Cfi
+        ) {
             // Model an implementation with no PMP entries so direct S/U-mode
             // execution and page-table walks can reach test RAM. Rivemu's bare
             // lockstep target uses the corresponding non-strict PMP policy.
@@ -227,6 +230,7 @@ impl SailGdbTarget {
         let port = pick_free_port()?;
         let mut command = Command::new(sail_bin);
         command
+            .arg("--enable-experimental-extensions")
             .args(extra_args)
             .arg("--gdb-server-port")
             .arg(port.to_string())
@@ -265,6 +269,7 @@ impl SailGdbTarget {
             bootstrap,
             dialect,
             debug_v1: false,
+            no_ack_mode: false,
             memory_chunk: DEFAULT_MEMORY_CHUNK,
             owned_elf: None,
         };
@@ -284,6 +289,13 @@ impl SailGdbTarget {
             };
         }
         target.memory_chunk = memory_chunk_from_supported(&response);
+        if response
+            .split(';')
+            .any(|feature| feature == "QStartNoAckMode+")
+            && target.cmd("QStartNoAckMode")? == "OK"
+        {
+            target.no_ack_mode = true;
+        }
         Ok(target)
     }
 
@@ -423,10 +435,14 @@ impl SailGdbTarget {
             self.stream.read_exact(&mut checksum_hex)?;
             let expected = parse_checksum(checksum_hex)?;
             if rsp_checksum(&transmitted) != expected {
-                self.stream.write_all(b"-")?;
+                if !self.no_ack_mode {
+                    self.stream.write_all(b"-")?;
+                }
                 continue;
             }
-            self.stream.write_all(b"+")?;
+            if !self.no_ack_mode {
+                self.stream.write_all(b"+")?;
+            }
             return decode_rsp_payload(&transmitted);
         }
         Err(TargetError::Protocol(

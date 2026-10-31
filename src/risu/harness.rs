@@ -4,6 +4,7 @@ use std::fmt;
 
 use rivemu_cpu_riscv::decode;
 
+use crate::risu::cfi;
 use crate::risu::encode::{
     EBREAK, build_supervisor_page_fault_handler, build_supervisor_trap_handler, build_trap_handler,
 };
@@ -91,6 +92,7 @@ impl RisuCase {
         let vm_setup = match suite {
             Suite::Sv39 => sv39::configure_case(seed, &mut init_state),
             Suite::Sv48 => sv39::configure_sv48_case(seed, &mut init_state),
+            Suite::Cfi => cfi::configure_case(seed, &mut init_state),
             _ => Vec::new(),
         };
         let (code_bytes, generated_insns) = if suite == Suite::Compressed {
@@ -106,6 +108,7 @@ impl RisuCase {
                 Suite::Privileged => generate_privileged_block(&mut rng, seed, num_insns),
                 Suite::Sv39 | Suite::Sv48 => sv39::generate_block(&mut rng, seed, num_insns),
                 Suite::Pmp => pmp::generate_block(&mut rng, seed, num_insns),
+                Suite::Cfi => cfi::generate_block(&mut rng, seed, num_insns),
                 _ => generate_block(&mut rng, suite, num_insns),
             };
             let generated_insns = insns.len().checked_sub(1).ok_or_else(|| {
@@ -163,6 +166,7 @@ impl RisuCase {
                 | Suite::Sv39
                 | Suite::Sv48
                 | Suite::Pmp
+                | Suite::Cfi
                 | Suite::Atomics
                 | Suite::Compressed
                 | Suite::All
@@ -545,7 +549,7 @@ impl<C: CosimTarget, R: CosimTarget> RisuHarness<C, R> {
     pub fn run_case(&mut self, case: &RisuCase) -> Result<Option<BisectReport>, TargetError> {
         if matches!(
             case.suite,
-            Suite::Privileged | Suite::Sv39 | Suite::Sv48 | Suite::Pmp
+            Suite::Privileged | Suite::Sv39 | Suite::Sv48 | Suite::Pmp | Suite::Cfi
         ) && !self.check_csrs
         {
             return Err(TargetError::Protocol(format!(
@@ -1249,6 +1253,6 @@ mod tests {
         assert!(rust_test.contains("fn regression_rv64c_0x0000000000004321_step_0()"));
         assert!(rust_test.contains("RivemuTarget::new_bare(true)"));
         assert!(rust_test.contains("target.step_one().unwrap();"));
-        assert_eq!(Suite::CAMPAIGN_SUITES.len(), 15);
+        assert_eq!(Suite::CAMPAIGN_SUITES.len(), 16);
     }
 }
