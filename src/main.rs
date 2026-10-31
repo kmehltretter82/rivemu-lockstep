@@ -36,6 +36,11 @@ impl RisuReference {
 }
 
 fn default_qemu() -> PathBuf {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let local = manifest.join("../qemu/build-d7314928-riscv64/qemu-system-riscv64");
+    if local.exists() {
+        return local;
+    }
     let brew = Path::new("/opt/homebrew/bin/qemu-system-riscv64");
     if brew.exists() {
         brew.to_path_buf()

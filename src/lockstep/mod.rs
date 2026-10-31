@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use rivemu_core::size::MIB;
-use rivemu_cpu_riscv::decode;
+use rivemu_cpu_riscv::decode::{self, Op};
 use rivemu_machine::{MachineConfig, virt::memmap};
 
 use crate::risu::BisectReport;
@@ -70,7 +70,7 @@ pub fn run_firmware_lockstep(
         "-machine",
         "virt",
         "-cpu",
-        "rv64,c=true,h=false,sv57=false,zba=true,zbb=true,zbc=true,zbs=true,zicbom=true,zicboz=true,zicond=true,svinval=true,svpbmt=true,sstc=true",
+        "rv64,c=true,h=false,pmp=false,smstateen=true,sv57=true,svnapot=true,zawrs=true,zabha=true,zacas=true,zba=true,zbb=true,zbc=true,zbkb=true,zbkc=true,zbkx=true,zbs=true,zca=true,zcb=true,zcd=true,zcmop=true,zfa=true,zicfilp=true,zicfiss=true,zicond=true,zicbom=true,zicboz=true,zimop=true,zknd=true,zkne=true,zknh=true,ssnpm=true,smnpm=true,x-svukte=true,svinval=true,svpbmt=true,sstc=true",
         "-m",
         "128M",
         "-smp",
@@ -107,29 +107,64 @@ pub fn run_firmware_lockstep(
     let mut pre_state = init_state;
     for step_index in 0..max_steps {
         let pc = pre_state.pc;
+        let fetch_pa = rivemu.machine.harts[0]
+            .debug_translate(&rivemu.machine.bus, pc)
+            .unwrap_or(pc);
         let mut low_bytes = [0u8; 2];
-        let (insn_word, insn_len, decoded_insn) = if rivemu.read_ram(pc, &mut low_bytes).is_ok() {
-            let low = u16::from_le_bytes(low_bytes);
-            if low & 3 != 3 {
-                (u32::from(low), 2u8, decode::decode_compressed(low))
+        let (insn_word, insn_len, decoded_insn) =
+            if rivemu.read_ram(fetch_pa, &mut low_bytes).is_ok() {
+                let low = u16::from_le_bytes(low_bytes);
+                if low & 3 != 3 {
+                    (u32::from(low), 2u8, decode::decode_compressed(low))
+                } else {
+                    let mut high_bytes = [0u8; 2];
+                    let fetch_pa_hi = rivemu.machine.harts[0]
+                        .debug_translate(&rivemu.machine.bus, pc.wrapping_add(2))
+                        .unwrap_or(fetch_pa.wrapping_add(2));
+                    rivemu.read_ram(fetch_pa_hi, &mut high_bytes)?;
+                    let raw = u32::from(low) | (u32::from(u16::from_le_bytes(high_bytes)) << 16);
+                    (raw, 4u8, decode::decode(raw))
+                }
             } else {
-                let mut high_bytes = [0u8; 2];
-                rivemu.read_ram(pc.wrapping_add(2), &mut high_bytes)?;
-                let raw = u32::from(low) | (u32::from(u16::from_le_bytes(high_bytes)) << 16);
-                (raw, 4u8, decode::decode(raw))
-            }
+                (0, 4u8, decode::decode(0))
+            };
+
+        let is_scalar_load = matches!(
+            decoded_insn.op,
+            Op::Lb | Op::Lh | Op::Lw | Op::Ld | Op::Lbu | Op::Lhu | Op::Lwu
+        );
+        let load_mmio_pa = if is_scalar_load && decoded_insn.rd != 0 {
+            let eff_va =
+                pre_state.x[decoded_insn.rs1 as usize].wrapping_add(decoded_insn.imm as i64 as u64);
+            rivemu.machine.harts[0]
+                .debug_translate(&rivemu.machine.bus, eff_va)
+                .filter(|&pa| pa < memmap::DRAM_BASE)
         } else {
-            (0, 4u8, decode::decode(0))
+            None
         };
 
-        if insn_len == 4 && insn_word == 0x1050_0073 {
-            return Err(TargetError::Protocol(format!(
-                "early boot lockstep reached wfi at step {step_index}; device-aware stepping is not implemented"
-            )));
+        // Non-trapping WFI (`0x1050_0073`): advance both targets past the wait instruction
+        // without blocking in QEMU's idle halt loop. When WFI is illegal (U-mode, or S-mode
+        // with mstatus.TW=1), step both targets normally so the trap is verified in lockstep.
+        let wfi_traps =
+            pre_state.prv == 0 || (pre_state.prv == 1 && (pre_state.mstatus & (1 << 21)) != 0);
+        if insn_len == 4 && insn_word == 0x1050_0073 && !wfi_traps {
+            rivemu.step_one()?;
+            rivemu.machine.harts[0].wfi = false;
+            qemu.write_reg(32, pc.wrapping_add(4))?;
+        } else {
+            rivemu.step_one()?;
+            qemu.step_one()?;
         }
 
-        rivemu.step_one()?;
-        qemu.step_one()?;
+        // Synchronize non-trapping MMIO load results (UART, CLINT mtime, RTC, PLIC) from QEMU to rivemu.
+        if load_mmio_pa.is_some()
+            && rivemu.machine.harts[0].pc == pc.wrapping_add(u64::from(insn_len))
+        {
+            let rd = decoded_insn.rd as usize;
+            let q_val = qemu.read_reg(rd as u32)?;
+            rivemu.machine.harts[0].x[rd] = q_val;
+        }
 
         // Synchronize hardware counter CSR reads (`time`, `cycle`, `instret`, `mcycle`, `minstret`)
         // from QEMU to rivemu when the instruction retired without trapping.
@@ -250,6 +285,73 @@ mod tests {
         let _ = std::fs::remove_file(&bios_path);
 
         let report = res.expect("firmware lockstep should succeed");
+        assert!(report.is_none(), "unexpected divergence: {:?}", report);
+    }
+
+    #[test]
+    fn firmware_lockstep_handles_uart_clint_mmio_and_wfi() {
+        let local_qemu = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../qemu/build-d7314928-riscv64/qemu-system-riscv64");
+        let brew_qemu = Path::new("/opt/homebrew/bin/qemu-system-riscv64");
+        let qemu_bin = if local_qemu.exists() {
+            local_qemu.as_path()
+        } else if brew_qemu.exists() {
+            brew_qemu
+        } else {
+            return;
+        };
+
+        let mut image = vec![0u8; 0x2000];
+        fn emit32(image: &mut [u8], offset: usize, word: u32) {
+            image[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+        }
+
+        // 0x0000: M-mode entry:
+        // - Install mtvec = 0x8000_0100
+        // - Read CLINT mtime at 0x0200_bff8 into x10
+        // - Poll UART LSR at 0x1000_0005 into x11 and write 'A' (0x41) to UART THR at 0x1000_0000
+        // - Execute non-trapping WFI in M-mode
+        // - Enable mstatus.TW (bit 21 = 0x0020_0000), set MPP = S (0x0800), mepc = 0x8000_0050, and mret
+        // - At 0x8000_0050 (S-mode with TW=1), execute WFI -> traps to mtvec (0x8000_0100) with ILLEGAL_INSN!
+        emit32(&mut image, 0x0000, 0x0000_0297); // auipc t0, 0              (0x8000_0000)
+        emit32(&mut image, 0x0004, 0x1002_8293); // addi t0, t0, 0x100       (mtvec = 0x8000_0100)
+        emit32(&mut image, 0x0008, 0x3052_9073); // csrw mtvec, t0
+        emit32(&mut image, 0x000c, 0x0200_c2b7); // lui t0, 0x0200c          (0x0200_c000)
+        emit32(&mut image, 0x0010, 0xff82_b503); // ld a0, -8(t0)            (load CLINT mtime @ 0x0200_bff8)
+        emit32(&mut image, 0x0014, 0x1000_02b7); // lui t0, 0x10000          (UART0 base 0x1000_0000)
+        emit32(&mut image, 0x0018, 0x0052_c583); // lbu a1, 5(t0)            (load UART LSR @ 0x1000_0005)
+        emit32(&mut image, 0x001c, 0x0410_0613); // li a2, 0x41              ('A')
+        emit32(&mut image, 0x0020, 0x00c2_8023); // sb a2, 0(t0)             (write UART THR @ 0x1000_0000)
+        emit32(&mut image, 0x0024, 0x1050_0073); // wfi                      (non-trapping M-mode WFI)
+        emit32(&mut image, 0x0028, 0x0020_12b7); // lui t0, 0x201            (0x0020_1000)
+        emit32(&mut image, 0x002c, 0x8002_8293); // addi t0, t0, -2048       (0x0020_0800 = TW | MPP_S)
+        emit32(&mut image, 0x0030, 0x3002_a073); // csrs mstatus, t0
+        emit32(&mut image, 0x0034, 0x0000_0297); // auipc t0, 0              (0x8000_0034)
+        emit32(&mut image, 0x0038, 0x01c2_8293); // addi t0, t0, 0x1c        (mepc = 0x8000_0050)
+        emit32(&mut image, 0x003c, 0x3412_9073); // csrw mepc, t0
+        emit32(&mut image, 0x0040, 0x3020_0073); // mret -> S-mode @ 0x8000_0050
+
+        // 0x0050: S-mode with TW=1
+        emit32(&mut image, 0x0050, 0x1050_0073); // wfi -> traps to M-mode @ 0x8000_0100!
+        emit32(&mut image, 0x0054, 0x0015_0513); // addi a0, a0, 1
+        emit32(&mut image, 0x0058, 0x0000_006f); // j 0x8000_0058
+
+        // 0x0100: M-mode trap handler
+        emit32(&mut image, 0x0100, 0x3420_26f3); // csrr a3, mcause
+        emit32(&mut image, 0x0104, 0x3410_22f3); // csrr t0, mepc
+        emit32(&mut image, 0x0108, 0x0042_8293); // addi t0, t0, 4
+        emit32(&mut image, 0x010c, 0x3412_9073); // csrw mepc, t0
+        emit32(&mut image, 0x0110, 0x3020_0073); // mret
+
+        let bios_path = std::env::temp_dir().join(format!(
+            "rivemu-lockstep-p26-test-{}.bin",
+            std::process::id()
+        ));
+        std::fs::write(&bios_path, &image).unwrap();
+        let res = run_firmware_lockstep(qemu_bin, &bios_path, None, 28, true);
+        let _ = std::fs::remove_file(&bios_path);
+
+        let report = res.expect("device-aware firmware lockstep should succeed");
         assert!(report.is_none(), "unexpected divergence: {:?}", report);
     }
 }
