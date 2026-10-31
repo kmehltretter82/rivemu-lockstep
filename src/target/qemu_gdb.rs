@@ -34,9 +34,9 @@ impl QemuGdbTarget {
     /// Spawns a bare-metal `qemu-system-riscv64` instance (`-bios none`) with configurable PMP support.
     pub fn spawn_bare_with_pmp(qemu_bin: &Path, pmp_enabled: bool) -> Result<Self, TargetError> {
         let cpu_arg = if pmp_enabled {
-            "rv64,c=true,h=false,pmp=true,sv57=false,zabha=true,zacas=true,zba=true,zbb=true,zbc=true,zbs=true,zca=true,zcb=true,zcd=true,zcmop=true,zfa=true,zicfilp=true,zicfiss=true,zicond=true,zicbom=true,zicboz=true,zimop=true,ssnpm=true,smnpm=true,x-svukte=true,svinval=true,svpbmt=true,sstc=true"
+            "rv64,c=true,h=false,pmp=true,sv57=true,svnapot=true,zawrs=true,zabha=true,zacas=true,zba=true,zbb=true,zbc=true,zbs=true,zca=true,zcb=true,zcd=true,zcmop=true,zfa=true,zicfilp=true,zicfiss=true,zicond=true,zicbom=true,zicboz=true,zimop=true,ssnpm=true,smnpm=true,x-svukte=true,svinval=true,svpbmt=true,sstc=true"
         } else {
-            "rv64,c=true,h=false,pmp=false,sv57=false,zabha=true,zacas=true,zba=true,zbb=true,zbc=true,zbs=true,zca=true,zcb=true,zcd=true,zcmop=true,zfa=true,zicfilp=true,zicfiss=true,zicond=true,zicbom=true,zicboz=true,zimop=true,ssnpm=true,smnpm=true,x-svukte=true,svinval=true,svpbmt=true,sstc=true"
+            "rv64,c=true,h=false,pmp=false,sv57=true,svnapot=true,zawrs=true,zabha=true,zacas=true,zba=true,zbb=true,zbc=true,zbs=true,zca=true,zcb=true,zcd=true,zcmop=true,zfa=true,zicfilp=true,zicfiss=true,zicond=true,zicbom=true,zicboz=true,zimop=true,ssnpm=true,smnpm=true,x-svukte=true,svinval=true,svpbmt=true,sstc=true"
         };
         let mut target = Self::spawn_with_args(
             qemu_bin,
@@ -549,5 +549,97 @@ mod tests {
             }
         }
         panic!("expected SW_CHECK trap at 0x8000_005c");
+    }
+
+    #[test]
+    fn zawrs_wrs_nto_and_wrs_sto_match_qemu_in_lockstep() {
+        let local_qemu =
+            "/Users/kmehltretter/codex/linux-work/qemu/build-d7314928-riscv64/qemu-system-riscv64";
+        let qemu_bin = if std::path::Path::new(local_qemu).exists() {
+            local_qemu
+        } else {
+            "qemu-system-riscv64"
+        };
+        let Ok(mut qemu) = QemuGdbTarget::spawn_bare_with_pmp(Path::new(qemu_bin), false) else {
+            return;
+        };
+        let mut rivemu = crate::target::RivemuTarget::new_bare(true).unwrap();
+
+        let code_base = 0x8000_0000u64;
+        let trap_base = 0x8000_2000u64;
+        let insns: [u32; 9] = [
+            0x1004_352f, // 0x00: lr.d    a0, (s0)
+            0x00d0_0073, // 0x04: wrs.nto (clears reservation, TW=0 in S-mode so no trap)
+            0x18c4_35af, // 0x08: sc.d    a1, a2, (s0) -> fails (a1 = 1)
+            0x1004_352f, // 0x0c: lr.d    a0, (s0)
+            0x01d0_0073, // 0x10: wrs.sto (clears reservation)
+            0x18c4_36af, // 0x14: sc.d    a3, a2, (s0) -> fails (a3 = 1)
+            0x01d0_0073, // 0x18: wrs.sto (retires even when TW=1)
+            0x00d0_0073, // 0x1c: wrs.nto (traps when TW=1 in S-mode)
+            0x0010_0073, // 0x20: ebreak
+        ];
+        let mut code_bytes = Vec::with_capacity(insns.len() * 4);
+        for word in insns {
+            code_bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        let trap_insns = crate::risu::encode::build_trap_handler();
+        let mut trap_bytes = Vec::with_capacity(trap_insns.len() * 4);
+        for word in trap_insns {
+            trap_bytes.extend_from_slice(&word.to_le_bytes());
+        }
+
+        // Phase 1: S-mode with TW = 0: both wrs.nto and wrs.sto retire and clear LR reservation.
+        let mut init = ArchState::default();
+        init.pc = code_base;
+        init.prv = 1; // S-mode
+        init.x[8] = 0x8001_0000;
+        init.x[12] = 0x77;
+
+        for target in [&mut rivemu as &mut dyn CosimTarget, &mut qemu] {
+            target.load_ram(code_base, &code_bytes).unwrap();
+            target.load_ram(trap_base, &trap_bytes).unwrap();
+            target.load_ram(0x8001_0000, &[0x11u8; 64]).unwrap();
+            target.set_state(&init).unwrap();
+            target.set_trap_vector(trap_base).unwrap();
+        }
+
+        for step in 0..6 {
+            rivemu.step_one().unwrap();
+            qemu.step_one().unwrap();
+            let r_state = rivemu.get_state().unwrap();
+            let q_state = qemu.get_state().unwrap();
+            let diffs = r_state.diff(&q_state, true);
+            assert!(
+                diffs.is_empty(),
+                "phase 1 step {step} diverged: {diffs:?}"
+            );
+        }
+        let post_p1 = rivemu.get_state().unwrap();
+        assert_eq!(post_p1.x[11], 1); // sc.d after wrs.nto failed
+        assert_eq!(post_p1.x[13], 1); // sc.d after wrs.sto failed
+
+        // Phase 2: S-mode with TW = 1 (1 << 21): wrs.sto at 0x18 retires, wrs.nto at 0x1c traps with ILLEGAL_INSN (2).
+        init.pc = code_base + 0x18;
+        init.mstatus |= 1 << 21; // TW
+        for target in [&mut rivemu as &mut dyn CosimTarget, &mut qemu] {
+            target.set_state(&init).unwrap();
+            target.set_trap_vector(trap_base).unwrap();
+        }
+
+        for step in 0..2 {
+            rivemu.step_one().unwrap();
+            qemu.step_one().unwrap();
+            let r_state = rivemu.get_state().unwrap();
+            let q_state = qemu.get_state().unwrap();
+            let diffs = r_state.diff(&q_state, true);
+            assert!(
+                diffs.is_empty(),
+                "phase 2 step {step} diverged: {diffs:?}"
+            );
+        }
+        let post_p2 = rivemu.get_state().unwrap();
+        assert_eq!(post_p2.pc, trap_base);
+        assert_eq!(post_p2.mcause, 2);
+        assert_eq!(post_p2.mtval, 0x00d0_0073);
     }
 }

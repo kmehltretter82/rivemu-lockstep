@@ -351,7 +351,11 @@ mod tests {
                     .unwrap(),
             );
             let insn = decode::decode(raw);
-            let expected_base_reg = 8 + ((slot >> 2) & 3) as u8;
+            let expected_base_reg = if (12..14).contains(&slot) {
+                12
+            } else {
+                8 + ((slot >> 2) & 3) as u8
+            };
             assert_eq!(insn.rs1, expected_base_reg);
             let expected_tval =
                 state_before.x[insn.rs1 as usize].wrapping_add(insn.imm as i64 as u64);

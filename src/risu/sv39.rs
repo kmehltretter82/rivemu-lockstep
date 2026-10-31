@@ -13,6 +13,7 @@ const PTE_X: u64 = 1 << 3;
 const PTE_U: u64 = 1 << 4;
 const PTE_A: u64 = 1 << 6;
 const PTE_D: u64 = 1 << 7;
+const PTE_N: u64 = 1 << 63;
 
 const MSTATUS_MPP_MASK: u64 = 3 << 11;
 const MSTATUS_MPP_SUPERVISOR: u64 = 1 << 11;
@@ -30,12 +31,16 @@ pub const L1_PAGE_BASE: u64 = ROOT_PAGE_BASE + PAGE_SIZE as u64;
 pub const L0_PAGE_BASE: u64 = L1_PAGE_BASE + PAGE_SIZE as u64;
 /// Physical base of the Sv48 level-3 root page table.
 pub const L3_PAGE_BASE: u64 = L0_PAGE_BASE + PAGE_SIZE as u64;
+/// Physical base of the Sv57 level-4 root page table.
+pub const L4_PAGE_BASE: u64 = L3_PAGE_BASE + PAGE_SIZE as u64;
 /// Base of the contiguous alternate-page and page-table setup image.
 pub const VM_SETUP_BASE: u64 = ALT_PAGE_BASE;
 /// Length of the contiguous Sv39 setup image.
 pub const VM_SETUP_LEN: usize = PAGE_SIZE * 4;
 /// Length of the contiguous Sv48 setup image (adds the level-3 root page table).
 pub const SV48_VM_SETUP_LEN: usize = PAGE_SIZE * 5;
+/// Length of the contiguous Sv57 setup image (adds the level-4 root page table).
+pub const SV57_VM_SETUP_LEN: usize = PAGE_SIZE * 6;
 /// Guest virtual alias used for permission probes over the physical scratch page.
 pub const PROBE_VA: u64 = VM_SETUP_BASE + VM_SETUP_LEN as u64;
 /// Executable virtual alias immediately above `PROBE_VA` used for fetch-fault recovery.
@@ -46,8 +51,15 @@ pub(crate) const INSN_FAULT_VA: u64 = EXEC_ALIAS_VA - 4;
 pub const SUPERPAGE_BASE_VA: u64 = CODE_BASE + 0x0020_0000;
 /// Superpage virtual alias whose `vpn[0]` selects `SCRATCH_BASE` inside `CODE_BASE..+2 MiB`.
 pub const SUPERPAGE_PROBE_VA: u64 = SUPERPAGE_BASE_VA + (SCRATCH_BASE - CODE_BASE);
+/// Base of the 64 KiB `Svnapot` level-0 window (`vpn[2] = 2, vpn[1] = 0, vpn[0] = 0x20..0x2f`).
+pub const NAPOT_BASE_VA: u64 = CODE_BASE + 0x0002_0000;
+/// Virtual probe inside the 64 KiB `Svnapot` window (`vpn[0] = 0x21` for positive offsets -> `ALT_PAGE_BASE`,
+/// `vpn[0] = 0x20` for negative offsets -> `SCRATCH_BASE + 0x800`).
+pub const NAPOT_PROBE_VA: u64 = NAPOT_BASE_VA + PAGE_SIZE as u64;
 /// Virtual alias mapped to a reserved `R=0, W=1` level-0 PTE.
 pub const RESERVED_RW_VA: u64 = EXEC_ALIAS_VA + PAGE_SIZE as u64;
+/// Virtual alias mapped to a reserved `Svnapot` (`N=1, ppn[3:0] != 8`) level-0 PTE.
+pub const RESERVED_NAPOT_VA: u64 = RESERVED_RW_VA + PAGE_SIZE as u64;
 /// Virtual alias mapped through a level-1 non-leaf PTE with reserved `PTE_U = 1`.
 pub const NONLEAF_ADU_VA: u64 = CODE_BASE + 0x0040_0000;
 /// Non-canonical Sv39 virtual address (`va[38] = 1`, `va[63:39] = 0`).
@@ -56,12 +68,18 @@ pub const NONCANONICAL_SV39_VA: u64 = 1u64 << 38;
 pub const SV48_HIGH_BASE: u64 = 1u64 << 39;
 /// Non-canonical Sv48 virtual address (`va[47] = 1`, `va[63:48] = 0`).
 pub const NONCANONICAL_SV48_VA: u64 = 1u64 << 47;
+/// High positive Sv57 virtual base (`vpn[4] = 1`, `256 TiB`).
+pub const SV57_HIGH_BASE: u64 = 1u64 << 48;
+/// Non-canonical Sv57 virtual address (`va[56] = 1`, `va[63:57] = 0`).
+pub const NONCANONICAL_SV57_VA: u64 = 1u64 << 56;
 
 const SATP_SV39: u64 = (8u64 << 60) | (ROOT_PAGE_BASE >> 12);
 pub(crate) const SATP_SV48: u64 = (9u64 << 60) | (L3_PAGE_BASE >> 12);
+pub(crate) const SATP_SV57: u64 = (10u64 << 60) | (L4_PAGE_BASE >> 12);
 pub(crate) const REMAP_ASID: u64 = 1;
 pub(crate) const SATP_SV39_REMAP_ASID: u64 = SATP_SV39 | (REMAP_ASID << 44);
 pub(crate) const SATP_SV48_REMAP_ASID: u64 = SATP_SV48 | (REMAP_ASID << 44);
+pub(crate) const SATP_SV57_REMAP_ASID: u64 = SATP_SV57 | (REMAP_ASID << 44);
 const PAGE_FAULT_DELEGATION: u64 = (1 << 12) | (1 << 13) | (1 << 15);
 const REMAP_FLAGS: u64 = PTE_V | PTE_R | PTE_W | PTE_A | PTE_D;
 
@@ -72,8 +90,12 @@ pub(crate) const PROBE_PTE_ADDR: u64 = L0_PAGE_BASE + vpn_index(PROBE_VA, 0) as 
 pub(crate) const INITIAL_PROBE_PTE: u64 = leaf_pte(SCRATCH_BASE, REMAP_FLAGS);
 pub(crate) const REPLACEMENT_PTE: u64 = leaf_pte(ALT_PAGE_BASE, REMAP_FLAGS);
 pub(crate) const VALID_SUPERPAGE_PTE: u64 = leaf_pte(CODE_BASE, REMAP_FLAGS);
+pub(crate) const VALID_NAPOT_PTE: u64 =
+    PTE_N | ((((SCRATCH_BASE >> 12) & !0xf) | 0x8) << 10) | REMAP_FLAGS;
 pub(crate) const MISALIGNED_SUPERPAGE_PTE: u64 = leaf_pte(SCRATCH_BASE, REMAP_FLAGS);
 pub(crate) const RESERVED_RW_PTE: u64 = leaf_pte(SCRATCH_BASE, PTE_V | PTE_W | PTE_A | PTE_D);
+pub(crate) const RESERVED_NAPOT_PTE: u64 =
+    PTE_N | ((((SCRATCH_BASE >> 12) & !0xf) | 0x4) << 10) | REMAP_FLAGS;
 pub(crate) const NONLEAF_ADU_PTE: u64 = pointer_pte(L0_PAGE_BASE) | PTE_U;
 pub(crate) const USER_EXEC_PROBE_PTE: u64 = leaf_pte(
     SCRATCH_BASE,
@@ -236,10 +258,14 @@ pub fn configure_case(seed: u64, state: &mut ArchState) -> Vec<u8> {
             state.x[13] = REMAP_ASID;
         }
     }
+    if case == Case::Superpage2Mib {
+        state.x[5] = NAPOT_PROBE_VA;
+    }
     if case == Case::MisalignedSuperpageFault {
         state.x[9] = RESERVED_RW_VA;
         state.x[10] = NONLEAF_ADU_VA;
         state.x[11] = NONCANONICAL_SV39_VA;
+        state.x[12] = RESERVED_NAPOT_VA;
     }
     if case == Case::InstructionPageFault {
         state.x[9] = EXEC_ALIAS_VA;
@@ -250,11 +276,17 @@ pub fn configure_case(seed: u64, state: &mut ArchState) -> Vec<u8> {
     build_setup_image(case)
 }
 
-/// Configures the initial architectural state and returns its physical 4-level Sv48 image.
+/// Whether a seed in [`Suite::Sv48`] exercises 5-level `Sv57` translation (`satp.MODE = 10`).
+pub const fn is_sv57_seed(seed: u64) -> bool {
+    matches!(seed & 0xf, 1 | 3 | 5 | 7 | 9 | 11 | 12 | 15) || (seed & 0x10 != 0)
+}
+
+/// Configures the initial architectural state and returns its physical 4-level Sv48 or 5-level Sv57 image.
 pub fn configure_sv48_case(seed: u64, state: &mut ArchState) -> Vec<u8> {
     let case = Case::from_seed(seed);
+    let sv57 = is_sv57_seed(seed);
     let mut image = configure_case(seed, state);
-    image.resize(SV48_VM_SETUP_LEN, 0);
+    image.resize(if sv57 { SV57_VM_SETUP_LEN } else { SV48_VM_SETUP_LEN }, 0);
     put_pte(
         &mut image,
         L3_PAGE_BASE,
@@ -267,19 +299,49 @@ pub fn configure_sv48_case(seed: u64, state: &mut ArchState) -> Vec<u8> {
         vpn_index(SV48_HIGH_BASE, 3),
         pointer_pte(ROOT_PAGE_BASE),
     );
-    state.satp = if case.uses_remap_asid() {
-        SATP_SV48_REMAP_ASID
+    let high_base = if sv57 {
+        put_pte(
+            &mut image,
+            L4_PAGE_BASE,
+            vpn_index(CODE_BASE, 4),
+            pointer_pte(L3_PAGE_BASE),
+        );
+        put_pte(
+            &mut image,
+            L4_PAGE_BASE,
+            vpn_index(SV57_HIGH_BASE, 4),
+            pointer_pte(L3_PAGE_BASE),
+        );
+        state.satp = if case.uses_remap_asid() {
+            SATP_SV57_REMAP_ASID
+        } else {
+            SATP_SV57
+        };
+        SV57_HIGH_BASE | SV48_HIGH_BASE
     } else {
-        SATP_SV48
+        state.satp = if case.uses_remap_asid() {
+            SATP_SV48_REMAP_ASID
+        } else {
+            SATP_SV48
+        };
+        SV48_HIGH_BASE
     };
-    state.x[8] |= SV48_HIGH_BASE;
+    state.x[8] |= high_base;
+    if case == Case::Superpage2Mib {
+        state.x[5] |= high_base;
+    }
     if case == Case::MisalignedSuperpageFault {
-        state.x[9] |= SV48_HIGH_BASE;
-        state.x[10] |= SV48_HIGH_BASE;
-        state.x[11] = NONCANONICAL_SV48_VA;
+        state.x[9] |= high_base;
+        state.x[10] |= high_base;
+        state.x[11] = if sv57 {
+            NONCANONICAL_SV57_VA
+        } else {
+            NONCANONICAL_SV48_VA
+        };
+        state.x[12] |= high_base;
     }
     if case == Case::InstructionPageFault {
-        state.x[9] |= SV48_HIGH_BASE;
+        state.x[9] |= high_base;
     }
     image
 }
@@ -316,11 +378,26 @@ pub fn generate_block(rng: &mut Rng, seed: u64, num_insns: usize) -> Vec<u32> {
     let mut out = Vec::with_capacity(num_insns + 1);
     while out.len() < num_insns {
         let slot = out.len();
-        let offset = ((rng.next_u64() % 256) * 8) as i32;
-        let base_reg = if case == Case::MisalignedSuperpageFault {
-            8 + ((slot >> 2) & 3) as u8
+        let raw_offset = ((rng.next_u64() % 256) * 8) as i32;
+        let (base_reg, offset) = if case == Case::MisalignedSuperpageFault {
+            let reg = if (12..14).contains(&slot) {
+                12
+            } else {
+                8 + ((slot >> 2) & 3) as u8
+            };
+            (reg, raw_offset)
+        } else if case == Case::Superpage2Mib && ((slot >> 1) & 1) == 1 {
+            // Alternate between 2 MiB L1 superpage (x8) and 64 KiB Svnapot L0 window (x5):
+            // positive offsets on loads hit vpn[0] = 0x21 (ALT_PAGE_BASE), negative offsets
+            // hit vpn[0] = 0x20 (SCRATCH_BASE + 0x800..0xff8).
+            let napot_off = if (slot & 3) == 2 && ((slot >> 2) & 1) == 0 {
+                raw_offset
+            } else {
+                raw_offset - 2048
+            };
+            (5, napot_off)
         } else {
-            8
+            (8, raw_offset)
         };
         let word = if case.loads_only() {
             let funct3 = if slot & 1 == 0 { 0b011 } else { 0b010 }; // LD / LW
@@ -371,6 +448,14 @@ fn build_setup_image(case: Case) -> Vec<u8> {
             vpn_index(SUPERPAGE_PROBE_VA, 1),
             VALID_SUPERPAGE_PTE,
         );
+        for i in 0..16 {
+            put_pte(
+                &mut image,
+                L0_PAGE_BASE,
+                vpn_index(NAPOT_BASE_VA, 0) + i,
+                VALID_NAPOT_PTE,
+            );
+        }
     } else if case == Case::MisalignedSuperpageFault {
         put_pte(
             &mut image,
@@ -389,6 +474,12 @@ fn build_setup_image(case: Case) -> Vec<u8> {
             L0_PAGE_BASE,
             vpn_index(RESERVED_RW_VA, 0),
             RESERVED_RW_PTE,
+        );
+        put_pte(
+            &mut image,
+            L0_PAGE_BASE,
+            vpn_index(RESERVED_NAPOT_VA, 0),
+            RESERVED_NAPOT_PTE,
         );
     }
 
@@ -632,10 +723,22 @@ mod tests {
         let superpage_image = configure_case(0x500c, &mut superpage_state);
         assert_eq!(superpage_state.prv, 1);
         assert_eq!(superpage_state.x[8], SUPERPAGE_PROBE_VA);
+        assert_eq!(superpage_state.x[5], NAPOT_PROBE_VA);
         assert_eq!(
             read_pte(&superpage_image, L1_PAGE_BASE, SUPERPAGE_PROBE_VA, 1),
             VALID_SUPERPAGE_PTE
         );
+        for i in 0..16 {
+            assert_eq!(
+                read_pte(
+                    &superpage_image,
+                    L0_PAGE_BASE,
+                    NAPOT_BASE_VA + (i as u64) * PAGE_SIZE as u64,
+                    0,
+                ),
+                VALID_NAPOT_PTE
+            );
+        }
 
         let mut misaligned_state = ArchState::default();
         let misaligned_image = configure_case(0x500d, &mut misaligned_state);
@@ -644,6 +747,7 @@ mod tests {
         assert_eq!(misaligned_state.x[9], RESERVED_RW_VA);
         assert_eq!(misaligned_state.x[10], NONLEAF_ADU_VA);
         assert_eq!(misaligned_state.x[11], NONCANONICAL_SV39_VA);
+        assert_eq!(misaligned_state.x[12], RESERVED_NAPOT_VA);
         assert_eq!(
             read_pte(&misaligned_image, L1_PAGE_BASE, SUPERPAGE_PROBE_VA, 1),
             MISALIGNED_SUPERPAGE_PTE
@@ -655,6 +759,10 @@ mod tests {
         assert_eq!(
             read_pte(&misaligned_image, L0_PAGE_BASE, RESERVED_RW_VA, 0),
             RESERVED_RW_PTE
+        );
+        assert_eq!(
+            read_pte(&misaligned_image, L0_PAGE_BASE, RESERVED_NAPOT_VA, 0),
+            RESERVED_NAPOT_PTE
         );
         assert_ne!((MISALIGNED_SUPERPAGE_PTE >> 10) & 0x1ff, 0);
 
@@ -749,5 +857,32 @@ mod tests {
         assert_eq!(misaligned.x[9], SV48_HIGH_BASE | RESERVED_RW_VA);
         assert_eq!(misaligned.x[10], SV48_HIGH_BASE | NONLEAF_ADU_VA);
         assert_eq!(misaligned.x[11], NONCANONICAL_SV48_VA);
+        assert_eq!(misaligned.x[12], SV48_HIGH_BASE | RESERVED_NAPOT_VA);
+
+        let mut sv57_state = ArchState::default();
+        let sv57_image = configure_sv48_case(0x600c, &mut sv57_state);
+        assert_eq!(sv57_image.len(), SV57_VM_SETUP_LEN);
+        assert_eq!(sv57_state.satp, SATP_SV57);
+        assert_eq!(
+            sv57_state.x[8],
+            SV57_HIGH_BASE | SV48_HIGH_BASE | SUPERPAGE_PROBE_VA
+        );
+        assert_eq!(
+            sv57_state.x[5],
+            SV57_HIGH_BASE | SV48_HIGH_BASE | NAPOT_PROBE_VA
+        );
+        assert_eq!(
+            read_pte(&sv57_image, L4_PAGE_BASE, CODE_BASE, 4),
+            pointer_pte(L3_PAGE_BASE)
+        );
+        assert_eq!(
+            read_pte(&sv57_image, L4_PAGE_BASE, SV57_HIGH_BASE, 4),
+            pointer_pte(L3_PAGE_BASE)
+        );
+
+        let mut sv57_misaligned = ArchState::default();
+        let _ = configure_sv48_case(0x601d, &mut sv57_misaligned);
+        assert_eq!(sv57_misaligned.satp, SATP_SV57);
+        assert_eq!(sv57_misaligned.x[11], NONCANONICAL_SV57_VA);
     }
 }
