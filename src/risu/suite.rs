@@ -765,7 +765,7 @@ fn gen_sandbox_mem(rng: &mut Rng, out: &mut Vec<u32>) {
         0
     };
 
-    let insn = match rng.next_u64() % 38 {
+    let insn = match rng.next_u64() % 48 {
         0 => i_type(0x03, rd, 0b000, 5, unaligned_off), // lb rd, off(t0)
         1 => i_type(0x03, rd, 0b001, 5, unaligned_off), // lh rd, off(t0)
         2 => i_type(0x03, rd, 0b010, 5, unaligned_off), // lw rd, off(t0)
@@ -814,6 +814,17 @@ fn gen_sandbox_mem(rng: &mut Rng, out: &mut Vec<u32>) {
             r_type(0x2f, rd2, 0b011, 5, rs2, 0b000_1100)
         }
         36 => r_type(0x2f, rd, 0b011, 5, rs2, 0b000_1100), // standalone sc.d (must fail with 1)
+        // Zabha (byte/halfword AMOs) & Zacas (compare-and-swap, rd != x0)
+        37 => r_type(0x2f, rd, 0b000, 5, rs2, 0b000_0000), // amoadd.b
+        38 => r_type(0x2f, rd, 0b000, 5, rs2, 0b000_0100), // amoswap.b
+        39 => r_type(0x2f, rd, 0b000, 5, rs2, 0b100_0000), // amomin.b
+        40 => r_type(0x2f, rd, 0b000, 5, rs2, 0b111_0000), // amomaxu.b
+        41 => r_type(0x2f, rd, 0b001, 5, rs2, 0b000_0000), // amoadd.h
+        42 => r_type(0x2f, rd, 0b001, 5, rs2, 0b100_0000), // amomin.h
+        43 => r_type(0x2f, rd, 0b001, 5, rs2, 0b111_0000), // amomaxu.h
+        44 => r_type(0x2f, rd.max(9), 0b000, 5, rs2, 0b001_0100), // amocas.b
+        45 => r_type(0x2f, rd.max(9), 0b001, 5, rs2, 0b001_0100), // amocas.h
+        46 => r_type(0x2f, rd.max(9), 0b010, 5, rs2, 0b001_0100), // amocas.w
         _ => i_type(0x0f, 0, 0b010, 5, 0x004),             // cbo.zero 0(t0)
     };
     out.push(insn);
@@ -831,18 +842,15 @@ const ATOMIC_AMO_FUNCTS: [u32; 9] = [
     0x1c, // amomaxu
 ];
 const ATOMIC_AMO_CASES: usize = ATOMIC_AMO_FUNCTS.len() * 2 * 4;
-const ATOMIC_CASES: usize = ATOMIC_AMO_CASES + 12;
+const ATOMIC_CASES: usize = ATOMIC_AMO_CASES + 20;
+
+fn atomic_insn_f3(funct5: u32, aqrl: u32, f3: u32, rd: u8, rs1: u8, rs2: u8) -> u32 {
+    debug_assert!(funct5 < 32 && aqrl < 4 && f3 <= 4);
+    r_type(0x2f, rd, f3, rs1, rs2, (funct5 << 2) | aqrl)
+}
 
 fn atomic_insn(funct5: u32, aqrl: u32, dbl: bool, rd: u8, rs1: u8, rs2: u8) -> u32 {
-    debug_assert!(funct5 < 32 && aqrl < 4);
-    r_type(
-        0x2f,
-        rd,
-        if dbl { 0b011 } else { 0b010 },
-        rs1,
-        rs2,
-        (funct5 << 2) | aqrl,
-    )
+    atomic_insn_f3(funct5, aqrl, if dbl { 0b011 } else { 0b010 }, rd, rs1, rs2)
 }
 
 fn atomic_slot_offset(slot: usize, dbl: bool) -> i32 {
@@ -949,12 +957,88 @@ fn gen_atomic_case(selector: usize, slot: usize, out: &mut Vec<u32>) {
             gen_atomic_setup(out, slot, false);
             out.push(atomic_insn(0x03, 0, false, 9, 5, 7));
         }
-        _ => {
+        11 => {
             // SC rd=rs1: the effective address must be captured before the
             // success status overwrites the address register.
             gen_atomic_setup(out, slot, true);
             out.push(atomic_insn(0x02, 0b10, true, 9, 5, 0));
             out.push(atomic_insn(0x03, 0b01, true, 5, 5, 7));
+        }
+        12 => {
+            // Zabha amoadd.b with negative byte (0xfe = -2) to verify sign-extension.
+            let offset = atomic_slot_offset(slot, false);
+            out.push(i_type(0x13, 5, 0b000, 8, offset));
+            out.push(i_type(0x13, 6, 0b000, 0, -2));
+            out.push(i_type(0x13, 7, 0b000, 0, 5));
+            out.push(s_type(0x23, 0b000, 5, 6, 0)); // sb t1, 0(t0)
+            out.push(atomic_insn_f3(0x00, 0b11, 0b000, 9, 5, 7)); // amoadd.b.aqrl s1, t2, (t0)
+        }
+        13 => {
+            // Zabha amomin.b / amomaxu.b signed vs unsigned byte comparison (-128 vs 127).
+            let offset = atomic_slot_offset(slot, false);
+            out.push(i_type(0x13, 5, 0b000, 8, offset));
+            out.push(i_type(0x13, 6, 0b000, 0, 0x80));
+            out.push(i_type(0x13, 7, 0b000, 0, 0x7f));
+            out.push(s_type(0x23, 0b000, 5, 6, 0));
+            out.push(atomic_insn_f3(0x10, 0, 0b000, 9, 5, 7)); // amomin.b
+            out.push(atomic_insn_f3(0x1c, 0, 0b000, 10, 5, 7)); // amomaxu.b
+        }
+        14 => {
+            // Zabha amoadd.h / amomin.h / amomaxu.h on halfword.
+            let offset = atomic_slot_offset(slot, false);
+            out.push(i_type(0x13, 5, 0b000, 8, offset));
+            out.push(u_type(0x37, 6, 0x1)); // 0x1000
+            out.push(i_type(0x13, 6, 0b100, 6, -0x800)); // 0x8000 in low 16 bits
+            out.push(i_type(0x13, 7, 0b000, 0, 0x7ff));
+            out.push(s_type(0x23, 0b001, 5, 6, 0)); // sh t1, 0(t0)
+            out.push(atomic_insn_f3(0x10, 0, 0b001, 9, 5, 7)); // amomin.h
+            out.push(atomic_insn_f3(0x1c, 0, 0b001, 10, 5, 7)); // amomaxu.h
+        }
+        15 => {
+            // Zabha + Zacas amocas.b match and mismatch (ignoring upper bits of rd).
+            let offset = atomic_slot_offset(slot, false);
+            out.push(i_type(0x13, 5, 0b000, 8, offset));
+            out.push(i_type(0x13, 6, 0b000, 0, -16)); // 0xf0
+            out.push(s_type(0x23, 0b000, 5, 6, 0));
+            out.push(i_type(0x13, 9, 0b000, 0, 0x1f0)); // upper bits non-zero, low byte 0xf0
+            out.push(i_type(0x13, 7, 0b000, 0, 0x42));
+            out.push(atomic_insn_f3(0x05, 0b11, 0b000, 9, 5, 7)); // amocas.b.aqrl s1, t2, (t0)
+        }
+        16 => {
+            // Zabha + Zacas amocas.h match and sign-extension check.
+            let offset = atomic_slot_offset(slot, false);
+            out.push(i_type(0x13, 5, 0b000, 8, offset));
+            out.push(i_type(0x13, 6, 0b000, 0, -123));
+            out.push(s_type(0x23, 0b001, 5, 6, 0));
+            out.push(i_type(0x13, 9, 0b000, 0, -123));
+            out.push(i_type(0x13, 7, 0b000, 0, 0x345));
+            out.push(atomic_insn_f3(0x05, 0b10, 0b001, 9, 5, 7)); // amocas.h.aq s1, t2, (t0)
+        }
+        17 => {
+            // Zacas amocas.w match and subsequent mismatch on 32-bit word.
+            gen_atomic_setup(out, slot, false);
+            out.push(u_type(0x37, 9, 0x80000)); // s1 = 0xffff_ffff_8000_0000
+            out.push(atomic_insn_f3(0x05, 0b11, 0b010, 9, 5, 7)); // matches, writes t2, s1 = old
+            out.push(atomic_insn_f3(0x05, 0, 0b010, 9, 5, 6)); // mismatches (mem is now t2 != s1)
+        }
+        18 => {
+            // Zacas amocas.d match and subsequent mismatch on 64-bit doubleword.
+            gen_atomic_setup(out, slot, true);
+            out.push(i_type(0x13, 9, 0b000, 6, 0)); // s1 = t1 (INT64_MIN)
+            out.push(atomic_insn_f3(0x05, 0b11, 0b011, 9, 5, 7)); // matches, writes t2
+            out.push(atomic_insn_f3(0x05, 0, 0b011, 9, 5, 6)); // mismatches
+        }
+        _ => {
+            // Zacas amocas.q 128-bit compare-and-swap on 16-byte aligned slot with even register pairs (x10/x11, x12/x13).
+            let offset = (((slot % 128) * 16) as i32) & !15;
+            out.push(i_type(0x13, 5, 0b000, 8, offset)); // 16-byte aligned t0
+            out.push(i_type(0x13, 10, 0b000, 0, 0x111));
+            out.push(i_type(0x13, 11, 0b000, 0, -0x222));
+            out.push(i_type(0x13, 12, 0b000, 0, 0x333));
+            out.push(i_type(0x13, 13, 0b000, 0, 0x444));
+            out.push(s_type(0x23, 0b011, 5, 10, 0));
+            out.push(s_type(0x23, 0b011, 5, 11, 8));
+            out.push(atomic_insn_f3(0x05, 0b11, 0b100, 10, 5, 12)); // amocas.q.aqrl a0, a2, (t0)
         }
     }
 }
@@ -1271,7 +1355,7 @@ mod tests {
 
     #[test]
     fn atomic_directed_cases_cover_aliases_and_lrsc() {
-        for directed in 0..12 {
+        for directed in 0..20 {
             let selector = ATOMIC_AMO_CASES + directed;
             let mut words = Vec::new();
             gen_atomic_case(selector, directed, &mut words);
@@ -1279,7 +1363,7 @@ mod tests {
                 .iter()
                 .copied()
                 .map(decode::decode)
-                .filter(|insn| matches!(insn.op, Op::Amo | Op::Lr | Op::Sc))
+                .filter(|insn| matches!(insn.op, Op::Amo | Op::AmoCas | Op::Lr | Op::Sc))
                 .collect();
             assert!(!atomics.is_empty(), "directed selector {directed}");
             assert!(atomics.iter().all(|insn| insn.rs1 == 5));
@@ -1297,6 +1381,7 @@ mod tests {
                         | Op::Lr
                         | Op::Sc
                         | Op::Amo
+                        | Op::AmoCas
                 ) {
                     assert!(!matches!(word.rd, 8 | 27));
                 }
@@ -1325,11 +1410,13 @@ mod tests {
                 9 => assert!(matches!(atomics.as_slice(), [lr, first, second]
                         if lr.op == Op::Lr && first.op == Op::Sc && second.op == Op::Sc)),
                 10 => assert_eq!(atomics[0].op, Op::Sc),
-                _ => {
+                11 => {
                     assert!(matches!(atomics.as_slice(), [lr, sc]
                             if lr.op == Op::Lr && sc.op == Op::Sc));
                     assert_eq!((atomics[1].rd, atomics[1].rs1), (5, 5));
                 }
+                12..=14 => assert!(atomics.iter().all(|insn| insn.op == Op::Amo)),
+                _ => assert!(atomics.iter().all(|insn| insn.op == Op::AmoCas)),
             }
         }
     }

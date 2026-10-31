@@ -33,9 +33,9 @@ impl QemuGdbTarget {
     /// Spawns a bare-metal `qemu-system-riscv64` instance (`-bios none`) with configurable PMP support.
     pub fn spawn_bare_with_pmp(qemu_bin: &Path, pmp_enabled: bool) -> Result<Self, TargetError> {
         let cpu_arg = if pmp_enabled {
-            "rv64,c=true,h=false,pmp=true,sv57=false,zba=true,zbb=true,zbc=true,zbs=true,zfa=true,zicond=true,zicbom=true,zicboz=true,svinval=true,svpbmt=true,sstc=true"
+            "rv64,c=true,h=false,pmp=true,sv57=false,zabha=true,zacas=true,zba=true,zbb=true,zbc=true,zbs=true,zfa=true,zicond=true,zicbom=true,zicboz=true,svinval=true,svpbmt=true,sstc=true"
         } else {
-            "rv64,c=true,h=false,pmp=false,sv57=false,zba=true,zbb=true,zbc=true,zbs=true,zfa=true,zicond=true,zicbom=true,zicboz=true,svinval=true,svpbmt=true,sstc=true"
+            "rv64,c=true,h=false,pmp=false,sv57=false,zabha=true,zacas=true,zba=true,zbb=true,zbc=true,zbs=true,zfa=true,zicond=true,zicbom=true,zicboz=true,svinval=true,svpbmt=true,sstc=true"
         };
         let mut target = Self::spawn_with_args(
             qemu_bin,
