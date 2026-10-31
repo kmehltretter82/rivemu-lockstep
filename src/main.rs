@@ -4,10 +4,12 @@
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Instant;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use rivemu_lockstep::lockstep::run_firmware_lockstep;
-use rivemu_lockstep::risu::{RisuCase, RisuHarness, Suite};
+use rivemu_lockstep::risu::{BisectReport, RisuCase, RisuHarness, Suite};
 use rivemu_lockstep::target::{QemuGdbTarget, RivemuTarget, SailGdbTarget};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,13 +63,17 @@ fn print_usage() {
         "\
 Usage:
   rivemu-lockstep risu [OPTIONS]
+  rivemu-lockstep campaign [OPTIONS]
   rivemu-lockstep boot --bios <PATH> [--kernel <PATH>] [OPTIONS]
 
-RISU Options:
+RISU / Campaign Options:
   --reference <sail|qemu>                       Reference model [default: sail]
   --suite <alu|control|fence-i|mul|bitmanip|float|fp-edges|mem|csr|privileged|sv39|sv48|pmp|atomics|compressed|all>
                                                  Instruction suite [default: all]
   --blocks <N>                                   Number of random blocks [default: 50]
+  --workers <N>                                  Parallel worker threads for campaign mode [default: 2]
+  --duration <SECS>                              Optional time budget in seconds for campaign mode
+  --emit-repro <PATH>                            Write minimized Rust regression test on divergence
   --insns <K>                                    Instructions per block [default: 32]
   --seed <HEX_OR_DEC>                            Starting PRNG seed [default: 0x1000]
   --check-csrs                                   Compare privileged CSRs at checkpoints
@@ -121,6 +127,10 @@ fn main() -> ExitCode {
 
     let mut suite = Suite::All;
     let mut blocks = 50usize;
+    let mut blocks_explicit = false;
+    let mut workers = 2usize;
+    let mut duration_secs: Option<u64> = None;
+    let mut emit_repro: Option<PathBuf> = None;
     let mut insns = 32usize;
     let mut start_seed = 0x1000u64;
     let mut check_csrs = false;
@@ -145,7 +155,7 @@ fn main() -> ExitCode {
         };
     }
 
-    let mut i = if matches!(mode, "risu" | "boot") {
+    let mut i = if matches!(mode, "risu" | "campaign" | "boot") {
         1
     } else {
         0
@@ -172,6 +182,25 @@ fn main() -> ExitCode {
             "--blocks" | "--seeds" => {
                 let flag = args[i].as_str();
                 blocks = value_or_exit!(parse_usize_option(&args, &mut i, flag));
+                blocks_explicit = true;
+            }
+            "--workers" => {
+                workers = value_or_exit!(parse_usize_option(&args, &mut i, "--workers"));
+            }
+            "--duration" => {
+                let value = value_or_exit!(option_value(&args, &mut i, "--duration"));
+                let secs = value_or_exit!(
+                    parse_u64(value)
+                        .map_err(|e| format!("invalid value for --duration ('{value}'): {e}"))
+                );
+                duration_secs = Some(secs);
+            }
+            "--emit-repro" => {
+                emit_repro = Some(PathBuf::from(value_or_exit!(option_value(
+                    &args,
+                    &mut i,
+                    "--emit-repro"
+                ))));
             }
             "--insns" => {
                 insns = value_or_exit!(parse_usize_option(&args, &mut i, "--insns"));
@@ -222,6 +251,10 @@ fn main() -> ExitCode {
         eprintln!("error: --blocks must be greater than zero");
         return ExitCode::from(2);
     }
+    if workers == 0 {
+        eprintln!("error: --workers must be greater than zero");
+        return ExitCode::from(2);
+    }
     if insns == 0 {
         eprintln!("error: --insns must be greater than zero");
         return ExitCode::from(2);
@@ -255,6 +288,27 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         }
+    } else if mode == "campaign" {
+        let max_blocks = if duration_secs.is_some() && !blocks_explicit {
+            usize::MAX
+        } else {
+            blocks
+        };
+        run_campaign(
+            reference,
+            suite,
+            workers,
+            max_blocks,
+            duration_secs.map(Duration::from_secs),
+            insns,
+            start_seed,
+            check_csrs,
+            step_check,
+            strict,
+            &sail_bin,
+            &qemu_bin,
+            emit_repro.as_deref(),
+        )
     } else {
         let t0 = Instant::now();
         let effective_check_csrs = check_csrs
@@ -303,7 +357,7 @@ fn main() -> ExitCode {
                                 "Divergence found after {block}/{blocks} blocks ({:.2?}):",
                                 t0.elapsed()
                             );
-                            print!("{report}");
+                            emit_divergence_report(&report, emit_repro.as_deref());
                             return ExitCode::from(1);
                         }
                         Err(error) => {
@@ -353,7 +407,7 @@ fn main() -> ExitCode {
                                 "Divergence found after {block}/{blocks} blocks ({:.2?}):",
                                 t0.elapsed()
                             );
-                            print!("{report}");
+                            emit_divergence_report(&report, emit_repro.as_deref());
                             return ExitCode::from(1);
                         }
                         Err(error) => {
@@ -377,4 +431,170 @@ fn main() -> ExitCode {
         );
         ExitCode::SUCCESS
     }
+}
+
+fn emit_divergence_report(report: &BisectReport, emit_repro: Option<&Path>) {
+    print!("{report}");
+    let rust_test = report.minimized_rust_test();
+    println!("\n--- Minimized Rust Regression Test ---\n{rust_test}");
+    if let Some(path) = emit_repro
+        && let Err(error) = std::fs::write(path, &rust_test)
+    {
+        eprintln!("warning: could not write reproducer to {}: {error}", path.display());
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_campaign(
+    reference: RisuReference,
+    suite: Suite,
+    workers: usize,
+    max_blocks: usize,
+    duration: Option<Duration>,
+    insns: usize,
+    start_seed: u64,
+    check_csrs: bool,
+    step_check: bool,
+    strict: bool,
+    sail_bin: &Path,
+    qemu_bin: &Path,
+    emit_repro: Option<&Path>,
+) -> ExitCode {
+    let t0 = Instant::now();
+    let deadline = duration.map(|d| t0 + d);
+    let next_block = AtomicUsize::new(0);
+    let completed_blocks = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    let first_divergence: Mutex<Option<(usize, BisectReport)>> = Mutex::new(None);
+    let first_error: Mutex<Option<String>> = Mutex::new(None);
+
+    let suites: &[Suite] = if suite == Suite::All {
+        &Suite::CAMPAIGN_SUITES
+    } else {
+        std::slice::from_ref(&suite)
+    };
+
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                while !stop.load(Ordering::Relaxed) {
+                    if let Some(limit) = deadline
+                        && Instant::now() >= limit
+                    {
+                        break;
+                    }
+                    let block = next_block.fetch_add(1, Ordering::Relaxed);
+                    if block >= max_blocks {
+                        break;
+                    }
+                    let active_suite = suites[block % suites.len()];
+                    let seed = start_seed.wrapping_add(block as u64);
+                    let effective_check_csrs = check_csrs
+                        || matches!(
+                            active_suite,
+                            Suite::Privileged | Suite::Sv39 | Suite::Sv48 | Suite::Pmp
+                        );
+                    let effective_step_check = step_check
+                        || reference == RisuReference::Sail
+                        || matches!(
+                            active_suite,
+                            Suite::FpEdges
+                                | Suite::Privileged
+                                | Suite::Sv39
+                                | Suite::Sv48
+                                | Suite::Pmp
+                        );
+
+                    let outcome = match RisuCase::generate(active_suite, seed, insns) {
+                        Ok(case) => match reference {
+                            RisuReference::Qemu => {
+                                RivemuTarget::new_bare(strict).and_then(|rivemu| {
+                                    QemuGdbTarget::spawn_bare_with_pmp(
+                                        qemu_bin,
+                                        active_suite == Suite::Pmp,
+                                    )
+                                    .and_then(|qemu| {
+                                        RisuHarness::new(rivemu, qemu, effective_check_csrs)
+                                    })
+                                    .and_then(|mut harness| {
+                                        harness.set_step_check(effective_step_check);
+                                        harness.run_case(&case)
+                                    })
+                                })
+                            }
+                            RisuReference::Sail => {
+                                RivemuTarget::new_bare(strict).and_then(|rivemu| {
+                                    SailGdbTarget::spawn_case(sail_bin, &case)
+                                        .and_then(|sail| {
+                                            RisuHarness::from_targets(
+                                                rivemu,
+                                                sail,
+                                                effective_check_csrs,
+                                            )
+                                        })
+                                        .and_then(|mut harness| {
+                                            harness.set_step_check(true);
+                                            harness.run_case(&case)
+                                        })
+                                })
+                            }
+                        },
+                        Err(error) => Err(error),
+                    };
+
+                    match outcome {
+                        Ok(None) => {
+                            completed_blocks.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Ok(Some(report)) => {
+                            stop.store(true, Ordering::Relaxed);
+                            let mut slot = first_divergence.lock().unwrap();
+                            if slot.is_none() {
+                                *slot = Some((block, report));
+                            }
+                            break;
+                        }
+                        Err(error) => {
+                            stop.store(true, Ordering::Relaxed);
+                            let mut slot = first_error.lock().unwrap();
+                            if slot.is_none() {
+                                *slot = Some(format!(
+                                    "error at block {block} (suite={}, seed={seed:#x}): {error}",
+                                    active_suite.name()
+                                ));
+                            }
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+    });
+
+    if let Some((block, report)) = first_divergence.into_inner().unwrap() {
+        println!(
+            "Divergence found at campaign block {block} ({:.2?}):",
+            t0.elapsed()
+        );
+        emit_divergence_report(&report, emit_repro);
+        return ExitCode::from(1);
+    }
+    if let Some(error) = first_error.into_inner().unwrap() {
+        eprintln!("{error}");
+        return ExitCode::from(2);
+    }
+
+    let done = completed_blocks.load(Ordering::Relaxed);
+    println!(
+        "PASS: campaign reference={} suite={} workers={} blocks={} requested_insns_per_block={} requested_insns_total={} start_seed={:#x} elapsed={:.2?}",
+        reference.name(),
+        suite.name(),
+        workers,
+        done,
+        insns,
+        done * insns,
+        start_seed,
+        t0.elapsed()
+    );
+    ExitCode::SUCCESS
 }

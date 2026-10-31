@@ -346,6 +346,90 @@ impl fmt::Display for BisectReport {
     }
 }
 
+impl BisectReport {
+    /// Emits a minimized standalone Rust `#[test]` regression snippet reproducing this single-instruction divergence.
+    pub fn minimized_rust_test(&self) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::with_capacity(1024);
+        let suite_ident = self.suite.name().replace('-', "_");
+        let _ = writeln!(
+            out,
+            "#[test]\nfn regression_{}_{:#018x}_step_{}() {{",
+            suite_ident, self.seed, self.step_index
+        );
+        let _ = writeln!(
+            out,
+            "    // Decoded: {} ({}-byte insn {:#010x} @ pc={:#010x})",
+            self.decoded, self.insn_len, self.insn_word, self.pc
+        );
+        let _ = writeln!(
+            out,
+            "    let mut target = RivemuTarget::new_bare(true);"
+        );
+        let _ = writeln!(out, "    let mut state = ArchState::default();");
+        let _ = writeln!(out, "    state.pc = {:#018x};", self.pre_state.pc);
+        let _ = writeln!(out, "    state.prv = {};", self.pre_state.prv);
+        let _ = writeln!(out, "    state.fcsr = {:#04x};", self.pre_state.fcsr);
+        let _ = writeln!(out, "    state.mstatus = {:#018x};", self.pre_state.mstatus);
+        if self.pre_state.satp != 0 {
+            let _ = writeln!(out, "    state.satp = {:#018x};", self.pre_state.satp);
+        }
+        if self.pre_state.medeleg != 0 {
+            let _ = writeln!(out, "    state.medeleg = {:#018x};", self.pre_state.medeleg);
+        }
+        if self.pre_state.stvec != 0 {
+            let _ = writeln!(out, "    state.stvec = {:#018x};", self.pre_state.stvec);
+        }
+        for (i, &val) in self.pre_state.x.iter().enumerate().skip(1) {
+            if val != 0 {
+                let _ = writeln!(out, "    state.x[{i}] = {val:#018x};");
+            }
+        }
+        for (i, &val) in self.pre_state.f.iter().enumerate() {
+            if val != 0xffff_ffff_0000_0000 {
+                let _ = writeln!(out, "    state.f[{i}] = {val:#018x};");
+            }
+        }
+        if self.insn_len == 2 {
+            let b0 = (self.insn_word & 0xff) as u8;
+            let b1 = ((self.insn_word >> 8) & 0xff) as u8;
+            let _ = writeln!(
+                out,
+                "    target.load_ram({:#018x}, &[{b0:#04x}, {b1:#04x}]).unwrap();",
+                self.pc
+            );
+        } else {
+            let bytes = self.insn_word.to_le_bytes();
+            let _ = writeln!(
+                out,
+                "    target.load_ram({:#018x}, &[{:#04x}, {:#04x}, {:#04x}, {:#04x}]).unwrap();",
+                self.pc, bytes[0], bytes[1], bytes[2], bytes[3]
+            );
+        }
+        let _ = writeln!(out, "    target.set_state(&state).unwrap();");
+        let _ = writeln!(out, "    target.step_one().unwrap();");
+        let _ = writeln!(out, "    let post = target.get_state().unwrap();");
+        for diff in &self.diffs {
+            let _ = writeln!(
+                out,
+                "    // Expected ({}) {} = {:#018x} ({} got {:#018x})",
+                self.reference_name,
+                diff.name,
+                diff.reference,
+                self.candidate_name,
+                diff.candidate
+            );
+        }
+        let _ = writeln!(
+            out,
+            "    assert_eq!(post.pc, {:#018x});",
+            self.reference_post.pc
+        );
+        let _ = writeln!(out, "}}");
+        out
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct FetchedInsn {
     raw: u32,
@@ -1144,5 +1228,27 @@ mod tests {
 
         let error = harness.run_seed(Suite::IntAlu, 4, 1).unwrap_err();
         assert!(error.to_string().contains("mock code read failure"));
+    }
+
+    #[test]
+    fn bisect_report_emits_minimized_rust_regression_test() {
+        let reference = MockTarget {
+            diverge_on_step: Some(0),
+            ..MockTarget::default()
+        };
+        let mut harness =
+            RisuHarness::from_targets(MockTarget::default(), reference, false).unwrap();
+        harness.set_step_check(true);
+
+        let report = harness
+            .run_seed(Suite::Compressed, 0x4321, 1)
+            .unwrap()
+            .expect("the first compressed instruction must diverge");
+        let rust_test = report.minimized_rust_test();
+        assert!(rust_test.contains("#[test]"));
+        assert!(rust_test.contains("fn regression_rv64c_0x0000000000004321_step_0()"));
+        assert!(rust_test.contains("RivemuTarget::new_bare(true)"));
+        assert!(rust_test.contains("target.step_one().unwrap();"));
+        assert_eq!(Suite::CAMPAIGN_SUITES.len(), 15);
     }
 }

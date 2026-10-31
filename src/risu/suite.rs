@@ -87,18 +87,37 @@ impl Suite {
             Self::All => "all",
         }
     }
+
+    /// All 15 concrete instruction/architectural suites cycled by `campaign` mode.
+    pub const CAMPAIGN_SUITES: [Self; 15] = [
+        Self::IntAlu,
+        Self::ControlFlow,
+        Self::FenceI,
+        Self::MulDiv,
+        Self::Bitmanip,
+        Self::Float,
+        Self::FpEdges,
+        Self::SandboxMem,
+        Self::CsrTrap,
+        Self::Privileged,
+        Self::Sv39,
+        Self::Sv48,
+        Self::Pmp,
+        Self::Atomics,
+        Self::Compressed,
+    ];
 }
 
 /// Generates a block of `num_insns` instructions for `suite`, terminated by `EBREAK`.
 pub fn generate_block(rng: &mut Rng, suite: Suite, num_insns: usize) -> Vec<u32> {
     let mut out = Vec::with_capacity(num_insns + 4);
     let mut atomic_slot = 0usize;
-    let mut atomic_selector = if suite == Suite::Atomics {
+    let mut atomic_selector = if matches!(suite, Suite::Atomics | Suite::All) {
         rng.index(ATOMIC_CASES)
     } else {
         0
     };
-    let mut fp_edge_selector = if suite == Suite::FpEdges {
+    let mut fp_edge_selector = if matches!(suite, Suite::FpEdges | Suite::All) {
         rng.index(fp_edges::CASE_COUNT)
     } else {
         0
@@ -110,7 +129,7 @@ pub fn generate_block(rng: &mut Rng, suite: Suite, num_insns: usize) -> Vec<u32>
     };
     while out.len() < num_insns {
         let active = match suite {
-            Suite::All => match rng.next_u64() % 8 {
+            Suite::All => match rng.next_u64() % 10 {
                 0 => Suite::IntAlu,
                 1 => Suite::ControlFlow,
                 2 => Suite::FenceI,
@@ -118,7 +137,9 @@ pub fn generate_block(rng: &mut Rng, suite: Suite, num_insns: usize) -> Vec<u32>
                 4 => Suite::Bitmanip,
                 5 => Suite::Float,
                 6 => Suite::SandboxMem,
-                _ => Suite::CsrTrap,
+                7 => Suite::CsrTrap,
+                8 => Suite::FpEdges,
+                _ => Suite::Atomics,
             },
             other => other,
         };

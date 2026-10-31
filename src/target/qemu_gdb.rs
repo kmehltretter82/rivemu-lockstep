@@ -179,9 +179,9 @@ impl CosimTarget for QemuGdbTarget {
     }
 
     fn load_ram(&mut self, gpa: u64, data: &[u8]) -> Result<(), TargetError> {
-        // Chunk writes into 2 KiB slices to stay well within GDB packet limits.
-        for (i, chunk) in data.chunks(2048).enumerate() {
-            let addr = gpa + (i * 2048) as u64;
+        // Chunk writes into 1 KiB slices (2048 hex chars) to stay well within QEMU's 0x1000 PacketSize.
+        for (i, chunk) in data.chunks(1024).enumerate() {
+            let addr = gpa + (i * 1024) as u64;
             let mut hex = String::with_capacity(chunk.len() * 2);
             for &b in chunk {
                 use std::fmt::Write as _;
@@ -198,8 +198,8 @@ impl CosimTarget for QemuGdbTarget {
     }
 
     fn read_ram(&mut self, gpa: u64, buf: &mut [u8]) -> Result<(), TargetError> {
-        for (i, chunk) in buf.chunks_mut(2048).enumerate() {
-            let addr = gpa + (i * 2048) as u64;
+        for (i, chunk) in buf.chunks_mut(1024).enumerate() {
+            let addr = gpa + (i * 1024) as u64;
             let resp = self.cmd(&format!("m{addr:x},{:x}", chunk.len()))?;
             if resp.len() != chunk.len() * 2 {
                 return Err(TargetError::Protocol(format!(
