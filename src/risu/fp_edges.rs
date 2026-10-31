@@ -3,7 +3,7 @@
 use crate::ArchState;
 use crate::risu::encode::{i_type, r_type, r4_type};
 
-pub(crate) const CASE_COUNT: usize = 30;
+pub(crate) const CASE_COUNT: usize = 36;
 
 const F64_POS_ZERO: u8 = 0;
 const F64_NEG_ZERO: u8 = 1;
@@ -216,6 +216,39 @@ pub(crate) fn generate_case(selector: usize, out: &mut Vec<u32>) {
             clear_fcsr(out);
             out.push(fp(0x00, FD, 0, F32_IMPROPER_SNAN, F32_ONE)); // fadd.s
         }
+        // Zfa: fli.s / fli.d, fminm.s / fmaxm.s on improper NaN-boxed operand,
+        // fround.d vs froundnx.d on 0.5, fcvtmod.w.d on 2^31, and quiet fleq.s / fltq.s.
+        30 => {
+            clear_fcsr(out);
+            out.push(fp(0x78, FD, 0, 21, 1)); // fli.s f28, 2.5
+        }
+        31 => {
+            clear_fcsr(out);
+            out.push(fp(0x79, FD, 0, 31, 1)); // fli.d f28, canonical NaN
+        }
+        32 => {
+            clear_fcsr(out);
+            out.push(fp(0x14, FD, 0b010, F32_IMPROPER_SNAN, F32_ONE)); // fminm.s -> canonical NaN
+        }
+        33 => {
+            clear_fcsr(out);
+            out.push(fp(0x21, FD, 0, F64_HALF, 4)); // fround.d f28, 0.5, rne (NX=0)
+        }
+        34 => {
+            clear_fcsr(out);
+            out.push(fp(0x21, FD, 0, F64_HALF, 5)); // froundnx.d f28, 0.5, rne (NX=1)
+        }
+        35 => {
+            clear_fcsr(out);
+            out.push(fp(
+                0x50,
+                GPR_COMPARE_RESULT,
+                0b100,
+                F32_IMPROPER_SNAN,
+                F32_ONE,
+            )); // fleq.s (quiet: NV=0 on unboxed canonical qNaN)
+            out.push(fp(0x61, GPR_CONVERT_RESULT, 0b001, F64_MAX_FINITE, 8)); // fcvtmod.w.d
+        }
         _ => unreachable!("floating-point edge selector outside the case matrix"),
     }
 }
@@ -300,7 +333,10 @@ mod tests {
             for raw in words {
                 let insn = decode::decode(raw);
                 assert_ne!(insn.op, Op::Illegal, "selector {selector}, raw {raw:#x}");
-                if matches!(insn.op, Op::Fclass | Op::Feq | Op::FmvXF | Op::FcvtIntF) {
+                if matches!(
+                    insn.op,
+                    Op::Fclass | Op::Feq | Op::Fleq | Op::Fltq | Op::FmvXF | Op::FcvtIntF | Op::FcvtmodWD
+                ) {
                     assert!(!matches!(insn.rd, 8 | 27));
                 }
             }
@@ -418,6 +454,19 @@ mod tests {
             assert_eq!((words[2] >> 15) & 0x1f, u32::from(F64_ONE));
             assert_eq!((words[0] >> 15) & 0x1f, (selector - 24) as u32);
             assert_eq!((words[2] >> 20) & 0x1f, u32::from(F64_HALF_ULP_AT_ONE));
+        }
+
+        for selector in 30..=35 {
+            let words = case_words(selector);
+            assert!(words.len() >= 2);
+            assert_csrwi(words[0], FCSR, 0);
+            for raw in &words[1..] {
+                let insn = decode::decode(*raw);
+                assert!(matches!(
+                    insn.op,
+                    Op::Fli | Op::Fminm | Op::Fround | Op::Froundnx | Op::Fleq | Op::FcvtmodWD
+                ));
+            }
         }
     }
 }

@@ -702,7 +702,7 @@ fn gen_float(rng: &mut Rng) -> u32 {
     let is_double = (rng.next_u64() & 1) != 0;
     let f7_fmt = if is_double { 1u32 } else { 0u32 };
 
-    match rng.next_u64() % 30 {
+    match rng.next_u64() % 38 {
         0 => r_type(0x53, fd, rm, fs1, fs2, f7_fmt), // fadd.s/d
         1 => r_type(0x53, fd, rm, fs1, fs2, 0x04 | f7_fmt), // fsub.s/d
         2 => r_type(0x53, fd, rm, fs1, fs2, 0x08 | f7_fmt), // fmul.s/d
@@ -732,7 +732,16 @@ fn gen_float(rng: &mut Rng) -> u32 {
         26 => r4_type(0x43, fd, rm, fs1, fs2, fs3, f7_fmt), // fmadd.s/d
         27 => r4_type(0x47, fd, rm, fs1, fs2, fs3, f7_fmt), // fmsub.s/d
         28 => r4_type(0x4b, fd, rm, fs1, fs2, fs3, f7_fmt), // fnmsub.s/d
-        _ => r4_type(0x4f, fd, rm, fs1, fs2, fs3, f7_fmt), // fnmadd.s/d
+        29 => r4_type(0x4f, fd, rm, fs1, fs2, fs3, f7_fmt), // fnmadd.s/d
+        // Zfa
+        30 => r_type(0x53, fd, 0b000, (rng.next_u64() & 0x1f) as u8, 1, 0x78 | f7_fmt), // fli.s/d
+        31 => r_type(0x53, fd, 0b010, fs1, fs2, 0x14 | f7_fmt), // fminm.s/d
+        32 => r_type(0x53, fd, 0b011, fs1, fs2, 0x14 | f7_fmt), // fmaxm.s/d
+        33 => r_type(0x53, fd, rm, fs1, 4, 0x20 | f7_fmt),      // fround.s/d
+        34 => r_type(0x53, fd, rm, fs1, 5, 0x20 | f7_fmt),      // froundnx.s/d
+        35 => r_type(0x53, rd, 0b001, fs1, 8, 0x61),            // fcvtmod.w.d
+        36 => r_type(0x53, rd, 0b100, fs1, fs2, 0x50 | f7_fmt), // fleq.s/d
+        _ => r_type(0x53, rd, 0b101, fs1, fs2, 0x50 | f7_fmt),  // fltq.s/d
     }
 }
 
