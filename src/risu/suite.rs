@@ -805,50 +805,56 @@ fn gen_float(rng: &mut Rng) -> u32 {
     } else {
         RMS[rng.index(6)]
     };
-    // fmt: 0 = .s (single), 1 = .d (double)
-    let is_double = (rng.next_u64() & 1) != 0;
-    let f7_fmt = if is_double { 1u32 } else { 0u32 };
+    // fmt: 0 = .s (single), 1 = .d (double), 2 = .h (half)
+    let f7_fmt = (rng.next_u64() % 3) as u32;
 
-    match rng.next_u64() % 38 {
-        0 => r_type(0x53, fd, rm, fs1, fs2, f7_fmt), // fadd.s/d
-        1 => r_type(0x53, fd, rm, fs1, fs2, 0x04 | f7_fmt), // fsub.s/d
-        2 => r_type(0x53, fd, rm, fs1, fs2, 0x08 | f7_fmt), // fmul.s/d
-        3 => r_type(0x53, fd, rm, fs1, fs2, 0x0c | f7_fmt), // fdiv.s/d
-        4 => r_type(0x53, fd, rm, fs1, 0, 0x2c | f7_fmt), // fsqrt.s/d
-        5 => r_type(0x53, fd, 0b000, fs1, fs2, 0x10 | f7_fmt), // fsgnj.s/d
-        6 => r_type(0x53, fd, 0b001, fs1, fs2, 0x10 | f7_fmt), // fsgnjn.s/d
-        7 => r_type(0x53, fd, 0b010, fs1, fs2, 0x10 | f7_fmt), // fsgnjx.s/d
-        8 => r_type(0x53, fd, 0b000, fs1, fs2, 0x14 | f7_fmt), // fmin.s/d
-        9 => r_type(0x53, fd, 0b001, fs1, fs2, 0x14 | f7_fmt), // fmax.s/d
-        10 => r_type(0x53, rd, 0b010, fs1, fs2, 0x50 | f7_fmt), // feq.s/d
-        11 => r_type(0x53, rd, 0b001, fs1, fs2, 0x50 | f7_fmt), // flt.s/d
-        12 => r_type(0x53, rd, 0b000, fs1, fs2, 0x50 | f7_fmt), // fle.s/d
-        13 => r_type(0x53, rd, 0b001, fs1, 0, 0x70 | f7_fmt), // fclass.s/d
-        14 => r_type(0x53, rd, rm, fs1, 0, 0x60 | f7_fmt), // fcvt.w.s/d
-        15 => r_type(0x53, rd, rm, fs1, 1, 0x60 | f7_fmt), // fcvt.wu.s/d
-        16 => r_type(0x53, rd, rm, fs1, 2, 0x60 | f7_fmt), // fcvt.l.s/d
-        17 => r_type(0x53, rd, rm, fs1, 3, 0x60 | f7_fmt), // fcvt.lu.s/d
-        18 => r_type(0x53, fd, rm, rs1, 0, 0x68 | f7_fmt), // fcvt.s/d.w
-        19 => r_type(0x53, fd, rm, rs1, 1, 0x68 | f7_fmt), // fcvt.s/d.wu
-        20 => r_type(0x53, fd, rm, rs1, 2, 0x68 | f7_fmt), // fcvt.s/d.l
-        21 => r_type(0x53, fd, rm, rs1, 3, 0x68 | f7_fmt), // fcvt.s/d.lu
+    match rng.next_u64() % 44 {
+        0 => r_type(0x53, fd, rm, fs1, fs2, f7_fmt), // fadd.s/d/h
+        1 => r_type(0x53, fd, rm, fs1, fs2, 0x04 | f7_fmt), // fsub.s/d/h
+        2 => r_type(0x53, fd, rm, fs1, fs2, 0x08 | f7_fmt), // fmul.s/d/h
+        3 => r_type(0x53, fd, rm, fs1, fs2, 0x0c | f7_fmt), // fdiv.s/d/h
+        4 => r_type(0x53, fd, rm, fs1, 0, 0x2c | f7_fmt), // fsqrt.s/d/h
+        5 => r_type(0x53, fd, 0b000, fs1, fs2, 0x10 | f7_fmt), // fsgnj.s/d/h
+        6 => r_type(0x53, fd, 0b001, fs1, fs2, 0x10 | f7_fmt), // fsgnjn.s/d/h
+        7 => r_type(0x53, fd, 0b010, fs1, fs2, 0x10 | f7_fmt), // fsgnjx.s/d/h
+        8 => r_type(0x53, fd, 0b000, fs1, fs2, 0x14 | f7_fmt), // fmin.s/d/h
+        9 => r_type(0x53, fd, 0b001, fs1, fs2, 0x14 | f7_fmt), // fmax.s/d/h
+        10 => r_type(0x53, rd, 0b010, fs1, fs2, 0x50 | f7_fmt), // feq.s/d/h
+        11 => r_type(0x53, rd, 0b001, fs1, fs2, 0x50 | f7_fmt), // flt.s/d/h
+        12 => r_type(0x53, rd, 0b000, fs1, fs2, 0x50 | f7_fmt), // fle.s/d/h
+        13 => r_type(0x53, rd, 0b001, fs1, 0, 0x70 | f7_fmt), // fclass.s/d/h
+        14 => r_type(0x53, rd, rm, fs1, 0, 0x60 | f7_fmt), // fcvt.w.s/d/h
+        15 => r_type(0x53, rd, rm, fs1, 1, 0x60 | f7_fmt), // fcvt.wu.s/d/h
+        16 => r_type(0x53, rd, rm, fs1, 2, 0x60 | f7_fmt), // fcvt.l.s/d/h
+        17 => r_type(0x53, rd, rm, fs1, 3, 0x60 | f7_fmt), // fcvt.lu.s/d/h
+        18 => r_type(0x53, fd, rm, rs1, 0, 0x68 | f7_fmt), // fcvt.s/d/h.w
+        19 => r_type(0x53, fd, rm, rs1, 1, 0x68 | f7_fmt), // fcvt.s/d/h.wu
+        20 => r_type(0x53, fd, rm, rs1, 2, 0x68 | f7_fmt), // fcvt.s/d/h.l
+        21 => r_type(0x53, fd, rm, rs1, 3, 0x68 | f7_fmt), // fcvt.s/d/h.lu
         22 => r_type(0x53, fd, rm, fs1, 1, 0x20),    // fcvt.s.d
         23 => r_type(0x53, fd, rm, fs1, 0, 0x21),    // fcvt.d.s
-        24 => r_type(0x53, rd, 0b000, fs1, 0, 0x70 | f7_fmt), // fmv.x.w / fmv.x.d
-        25 => r_type(0x53, fd, 0b000, rs1, 0, 0x78 | f7_fmt), // fmv.w.x / fmv.d.x
-        26 => r4_type(0x43, fd, rm, fs1, fs2, fs3, f7_fmt), // fmadd.s/d
-        27 => r4_type(0x47, fd, rm, fs1, fs2, fs3, f7_fmt), // fmsub.s/d
-        28 => r4_type(0x4b, fd, rm, fs1, fs2, fs3, f7_fmt), // fnmsub.s/d
-        29 => r4_type(0x4f, fd, rm, fs1, fs2, fs3, f7_fmt), // fnmadd.s/d
+        24 => r_type(0x53, rd, 0b000, fs1, 0, 0x70 | f7_fmt), // fmv.x.w / fmv.x.d / fmv.x.h
+        25 => r_type(0x53, fd, 0b000, rs1, 0, 0x78 | f7_fmt), // fmv.w.x / fmv.d.x / fmv.h.x
+        26 => r4_type(0x43, fd, rm, fs1, fs2, fs3, f7_fmt), // fmadd.s/d/h
+        27 => r4_type(0x47, fd, rm, fs1, fs2, fs3, f7_fmt), // fmsub.s/d/h
+        28 => r4_type(0x4b, fd, rm, fs1, fs2, fs3, f7_fmt), // fnmsub.s/d/h
+        29 => r4_type(0x4f, fd, rm, fs1, fs2, fs3, f7_fmt), // fnmadd.s/d/h
         // Zfa
-        30 => r_type(0x53, fd, 0b000, (rng.next_u64() & 0x1f) as u8, 1, 0x78 | f7_fmt), // fli.s/d
-        31 => r_type(0x53, fd, 0b010, fs1, fs2, 0x14 | f7_fmt), // fminm.s/d
-        32 => r_type(0x53, fd, 0b011, fs1, fs2, 0x14 | f7_fmt), // fmaxm.s/d
-        33 => r_type(0x53, fd, rm, fs1, 4, 0x20 | f7_fmt),      // fround.s/d
-        34 => r_type(0x53, fd, rm, fs1, 5, 0x20 | f7_fmt),      // froundnx.s/d
+        30 => r_type(0x53, fd, 0b000, (rng.next_u64() & 0x1f) as u8, 1, 0x78 | f7_fmt), // fli.s/d/h
+        31 => r_type(0x53, fd, 0b010, fs1, fs2, 0x14 | f7_fmt), // fminm.s/d/h
+        32 => r_type(0x53, fd, 0b011, fs1, fs2, 0x14 | f7_fmt), // fmaxm.s/d/h
+        33 => r_type(0x53, fd, rm, fs1, 4, 0x20 | f7_fmt),      // fround.s/d/h
+        34 => r_type(0x53, fd, rm, fs1, 5, 0x20 | f7_fmt),      // froundnx.s/d/h
         35 => r_type(0x53, rd, 0b001, fs1, 8, 0x61),            // fcvtmod.w.d
-        36 => r_type(0x53, rd, 0b100, fs1, fs2, 0x50 | f7_fmt), // fleq.s/d
-        _ => r_type(0x53, rd, 0b101, fs1, fs2, 0x50 | f7_fmt),  // fltq.s/d
+        36 => r_type(0x53, rd, 0b100, fs1, fs2, 0x50 | f7_fmt), // fleq.s/d/h
+        37 => r_type(0x53, rd, 0b101, fs1, fs2, 0x50 | f7_fmt), // fltq.s/d/h
+        // Zfh / Zfhmin / Zfbfmin format conversions
+        38 => r_type(0x53, fd, rm, fs1, 2, 0x20),    // fcvt.s.h
+        39 => r_type(0x53, fd, rm, fs1, 0, 0x22),    // fcvt.h.s
+        40 => r_type(0x53, fd, rm, fs1, 2, 0x21),    // fcvt.d.h
+        41 => r_type(0x53, fd, rm, fs1, 1, 0x22),    // fcvt.h.d
+        42 => r_type(0x53, fd, rm, fs1, 6, 0x20),    // fcvt.s.bf16
+        _ => r_type(0x53, fd, rm, fs1, 8, 0x22),     // fcvt.bf16.s
     }
 }
 
@@ -872,7 +878,7 @@ fn gen_sandbox_mem(rng: &mut Rng, out: &mut Vec<u32>) {
         0
     };
 
-    let insn = match rng.next_u64() % 48 {
+    let insn = match rng.next_u64() % 50 {
         0 => i_type(0x03, rd, 0b000, 5, unaligned_off), // lb rd, off(t0)
         1 => i_type(0x03, rd, 0b001, 5, unaligned_off), // lh rd, off(t0)
         2 => i_type(0x03, rd, 0b010, 5, unaligned_off), // lw rd, off(t0)
@@ -932,7 +938,9 @@ fn gen_sandbox_mem(rng: &mut Rng, out: &mut Vec<u32>) {
         44 => r_type(0x2f, rd.max(9), 0b000, 5, rs2, 0b001_0100), // amocas.b
         45 => r_type(0x2f, rd.max(9), 0b001, 5, rs2, 0b001_0100), // amocas.h
         46 => r_type(0x2f, rd.max(9), 0b010, 5, rs2, 0b001_0100), // amocas.w
-        _ => i_type(0x0f, 0, 0b010, 5, 0x004),             // cbo.zero 0(t0)
+        47 => i_type(0x07, fd, 0b001, 5, unaligned_off),    // flh fd, off(t0)
+        48 => s_type(0x27, 0b001, 5, fs2, unaligned_off),   // fsh fs2, off(t0)
+        _ => i_type(0x0f, 0, 0b010, 5, 0x004),              // cbo.zero 0(t0)
     };
     out.push(insn);
 }

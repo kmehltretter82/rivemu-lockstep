@@ -3,7 +3,7 @@
 use crate::ArchState;
 use crate::risu::encode::{i_type, r_type, r4_type};
 
-pub(crate) const CASE_COUNT: usize = 36;
+pub(crate) const CASE_COUNT: usize = 42;
 
 const F64_POS_ZERO: u8 = 0;
 const F64_NEG_ZERO: u8 = 1;
@@ -23,6 +23,10 @@ const F32_NEG_ZERO: u8 = 18;
 const F32_IMPROPER_SNAN: u8 = 19;
 const F32_TWO31: u8 = 20;
 const F32_ONE: u8 = 21;
+const F16_POS_ONE: u8 = 22;
+const F16_HALF: u8 = 23;
+const F16_IMPROPER_SNAN: u8 = 24;
+const BF16_THREE: u8 = 25;
 const FD: u8 = 28;
 
 const GPR_CLASS_RESULT: u8 = 9;
@@ -69,6 +73,11 @@ pub(crate) fn configure_initial_state(state: &mut ArchState) {
     state.f[F32_IMPROPER_SNAN as usize] = 0x0000_0000_ff80_0001;
     state.f[F32_TWO31 as usize] = 0xffff_ffff_4f00_0000;
     state.f[F32_ONE as usize] = 0xffff_ffff_3f80_0000;
+    state.f[F16_POS_ONE as usize] = 0xffff_ffff_ffff_3c00;
+    state.f[F16_HALF as usize] = 0xffff_ffff_ffff_3800;
+    // Properly 32-bit boxed, but improperly 16-bit boxed (bits [31:16] == 0x0000 != 0xffff).
+    state.f[F16_IMPROPER_SNAN as usize] = 0xffff_ffff_0000_fc01;
+    state.f[BF16_THREE as usize] = 0xffff_ffff_ffff_4040;
     state.f[FD as usize] = 0x5a5a_a5a5_dead_beef;
     state.fcsr = 0;
     // Make the suite independent of the random seed's FS state.
@@ -248,6 +257,48 @@ pub(crate) fn generate_case(selector: usize, out: &mut Vec<u32>) {
                 F32_ONE,
             )); // fleq.s (quiet: NV=0 on unboxed canonical qNaN)
             out.push(fp(0x61, GPR_CONVERT_RESULT, 0b001, F64_MAX_FINITE, 8)); // fcvtmod.w.d
+        }
+        // Zfh, Zfhmin, Zfbfmin, and Zfa half-precision:
+        36 => {
+            clear_fcsr(out);
+            out.push(fp(0x7a, FD, 0, 21, 1)); // fli.h f28, 2.5 (0x4100)
+        }
+        37 => {
+            clear_fcsr(out);
+            out.push(fp(0x02, FD, 0, F16_IMPROPER_SNAN, F16_POS_ONE)); // fadd.h -> canonical fp16 NaN (NV=0)
+            out.push(fp(0x72, GPR_MOVE_RESULT, 0, F16_IMPROPER_SNAN, 0)); // fmv.x.h -> sign-extended 0xfc01
+        }
+        38 => {
+            clear_fcsr(out);
+            out.push(fp(0x16, FD, 0b010, F16_IMPROPER_SNAN, F16_POS_ONE)); // fminm.h -> canonical fp16 NaN
+            out.push(fp(0x22, FD, 0, F16_HALF, 5)); // froundnx.h f28, 0.5, rne (NX=1)
+        }
+        39 => {
+            clear_fcsr(out);
+            out.push(fp(0x20, FD, 0, F16_POS_ONE, 2)); // fcvt.s.h f28, 1.0
+            out.push(fp(0x22, FD, 0, F64_THREE, 1)); // fcvt.h.d f28, 3.0
+        }
+        40 => {
+            clear_fcsr(out);
+            out.push(fp(0x22, FD, 0, F32_ONE, 8)); // fcvt.bf16.s f28, 1.0
+            out.push(fp(0x20, FD, 0, BF16_THREE, 6)); // fcvt.s.bf16 f28, 3.0
+        }
+        41 => {
+            clear_fcsr(out);
+            out.push(fp(
+                0x52,
+                GPR_COMPARE_RESULT,
+                0b100,
+                F16_HALF,
+                F16_POS_ONE,
+            )); // fleq.h
+            out.push(fp(
+                0x52,
+                GPR_COMPARE_RESULT,
+                0b101,
+                F16_IMPROPER_SNAN,
+                F16_POS_ONE,
+            )); // fltq.h (quiet on unboxed canonical qNaN)
         }
         _ => unreachable!("floating-point edge selector outside the case matrix"),
     }
@@ -456,7 +507,7 @@ mod tests {
             assert_eq!((words[2] >> 20) & 0x1f, u32::from(F64_HALF_ULP_AT_ONE));
         }
 
-        for selector in 30..=35 {
+        for selector in 30..=41 {
             let words = case_words(selector);
             assert!(words.len() >= 2);
             assert_csrwi(words[0], FCSR, 0);
@@ -464,7 +515,16 @@ mod tests {
                 let insn = decode::decode(*raw);
                 assert!(matches!(
                     insn.op,
-                    Op::Fli | Op::Fminm | Op::Fround | Op::Froundnx | Op::Fleq | Op::FcvtmodWD
+                    Op::Fli
+                        | Op::Fadd
+                        | Op::FmvXF
+                        | Op::Fminm
+                        | Op::Fround
+                        | Op::Froundnx
+                        | Op::FcvtFF
+                        | Op::Fleq
+                        | Op::Fltq
+                        | Op::FcvtmodWD
                 ));
             }
         }

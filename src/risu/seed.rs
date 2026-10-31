@@ -135,13 +135,32 @@ impl Rng {
             0x0000_0000_3f80_0000,
             0xdead_beef_3f80_0000,
             0x7fff_ffff_7f80_0001,
+            // Half-precision (f16 / bf16) properly NaN-boxed (`0xffff_ffff_ffff_xxxx`):
+            0xffff_ffff_ffff_0000, // +0.0 (f16/bf16)
+            0xffff_ffff_ffff_8000, // -0.0 (f16/bf16)
+            0xffff_ffff_ffff_0001, // smallest positive subnormal (f16/bf16)
+            0xffff_ffff_ffff_03ff, // largest positive f16 subnormal
+            0xffff_ffff_ffff_0400, // smallest positive f16 normal
+            0xffff_ffff_ffff_3800, // +0.5 (f16)
+            0xffff_ffff_ffff_3c00, // +1.0 (f16)
+            0xffff_ffff_ffff_bc00, // -1.0 (f16)
+            0xffff_ffff_ffff_7bff, // max finite f16 (65504.0)
+            0xffff_ffff_ffff_7c00, // +Inf (f16)
+            0xffff_ffff_ffff_fc00, // -Inf (f16)
+            0xffff_ffff_ffff_7e00, // canonical qNaN (f16)
+            0xffff_ffff_ffff_7c01, // signaling sNaN (f16)
+            0xffff_ffff_ffff_3f80, // +1.0 (bf16)
+            0xffff_ffff_ffff_7fc0, // canonical qNaN (bf16)
+            0xffff_ffff_ffff_7f81, // signaling sNaN (bf16)
         ];
         if (self.next_u64() % 4) != 0 {
             FP_EDGES[self.index(FP_EDGES.len())]
-        } else if (self.next_u64() & 1) == 0 {
-            0xffff_ffff_0000_0000 | (self.next_u64() & 0xffff_ffff)
         } else {
-            self.next_u64()
+            match self.next_u64() % 3 {
+                0 => 0xffff_ffff_0000_0000 | (self.next_u64() & 0xffff_ffff),
+                1 => 0xffff_ffff_ffff_0000 | (self.next_u64() & 0xffff),
+                _ => self.next_u64(),
+            }
         }
     }
 
