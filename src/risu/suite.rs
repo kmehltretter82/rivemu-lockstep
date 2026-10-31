@@ -757,8 +757,9 @@ fn gen_crypto(rng: &mut Rng) -> u32 {
     let rs1 = rng.pick_src_gpr();
     let rs2 = rng.pick_src_gpr();
     let rnum = (rng.next_u64() % 11) as i32; // valid 0..=10
+    let bs = ((rng.next_u64() & 3) as u32) << 5;
 
-    match rng.next_u64() % 24 {
+    match rng.next_u64() % 28 {
         // Zbkb
         0 => r_type(0x33, rd, 0b100, rs1, rs2, 0x04), // pack
         1 => r_type(0x33, rd, 0b111, rs1, rs2, 0x04), // packh
@@ -787,7 +788,12 @@ fn gen_crypto(rng: &mut Rng) -> u32 {
         20 => i_type(0x13, rd, 0b001, rs1, 0x104), // sha512sum0
         21 => i_type(0x13, rd, 0b001, rs1, 0x105), // sha512sum1
         22 => i_type(0x13, rd, 0b001, rs1, 0x106), // sha512sig0
-        _ => i_type(0x13, rd, 0b001, rs1, 0x107),  // sha512sig1
+        23 => i_type(0x13, rd, 0b001, rs1, 0x107), // sha512sig1
+        // Zksed / Zksh (ShangMi SM4 & SM3 scalar cryptography)
+        24 => r_type(0x33, rd, 0b000, rs1, rs2, bs | 0x18), // sm4ed
+        25 => r_type(0x33, rd, 0b000, rs1, rs2, bs | 0x1a), // sm4ks
+        26 => i_type(0x13, rd, 0b001, rs1, 0x108),          // sm3p0
+        _ => i_type(0x13, rd, 0b001, rs1, 0x109),           // sm3p1
     }
 }
 
@@ -1170,7 +1176,7 @@ fn gen_csr_trap(rng: &mut Rng, out: &mut Vec<u32>) {
     }
 }
 
-const PRIVILEGED_CASES: usize = 8;
+const PRIVILEGED_CASES: usize = 10;
 
 fn gen_privileged_case(selector: usize, rng: &mut Rng) -> u32 {
     debug_assert!(selector < PRIVILEGED_CASES);
@@ -1183,6 +1189,8 @@ fn gen_privileged_case(selector: usize, rng: &mut Rng) -> u32 {
         4 => i_type(0x73, rd, 0b010, 0, 0x100),              // CSRRS sstatus
         5 => i_type(0x73, rd, 0b010, 0, 0x180),              // CSRRS satp
         6 => 0x1200_0073,                                    // SFENCE.VMA x0, x0
+        7 => i_type(0x73, rd, 0b001, 0, 0x015),              // CSRRW rd, seed, x0 (traps in S/U when SSEED/USEED=0)
+        8 => i_type(0x73, rd, 0b010, 0, 0x015),              // CSRRS rd, seed, x0 (read-only access to seed always traps)
         _ => i_type(0x73, 0, 0b001, 0, 0x100),               // CSRW sstatus, x0
     }
 }

@@ -70,7 +70,7 @@ pub fn run_firmware_lockstep(
         "-machine",
         "virt",
         "-cpu",
-        "rv64,c=true,h=false,pmp=false,smstateen=true,sv57=true,svnapot=true,zawrs=true,zabha=true,zacas=true,zba=true,zbb=true,zbc=true,zbkb=true,zbkc=true,zbkx=true,zbs=true,zca=true,zcb=true,zcd=true,zcmop=true,zfa=true,zfbfmin=true,zfh=true,zfhmin=true,zicfilp=true,zicfiss=true,zicond=true,zicbom=true,zicboz=true,zimop=true,zknd=true,zkne=true,zknh=true,ssnpm=true,smnpm=true,x-svukte=true,svinval=true,svpbmt=true,sstc=true",
+        "rv64,c=true,h=false,pmp=false,smstateen=true,sv57=true,svnapot=true,zawrs=true,zabha=true,zacas=true,zba=true,zbb=true,zbc=true,zbkb=true,zbkc=true,zbkx=true,zbs=true,zca=true,zcb=true,zcd=true,zcmop=true,zfa=true,zfbfmin=true,zfh=true,zfhmin=true,zicfilp=true,zicfiss=true,zicond=true,zicbom=true,zicboz=true,zimop=true,zknd=true,zkne=true,zknh=true,zkr=true,zksed=true,zksh=true,zkt=true,ssnpm=true,smnpm=true,x-svukte=true,svinval=true,svpbmt=true,sstc=true",
         "-m",
         "128M",
         "-smp",
@@ -167,12 +167,13 @@ pub fn run_firmware_lockstep(
         }
 
         // Synchronize hardware counter CSR reads (`time`, `cycle`, `instret`, `mcycle`, `minstret`)
-        // from QEMU to rivemu when the instruction retired without trapping.
+        // and entropy `seed` (`0x015`) RMW reads from QEMU to rivemu when the instruction retired without trapping.
         if insn_len == 4
-            && matches!(
+            && rivemu.machine.harts[0].pc == pc.wrapping_add(u64::from(insn_len))
+            && (matches!(
                 insn_word & 0xfff0_707f,
                 0xc000_2073 | 0xc010_2073 | 0xc020_2073 | 0xb000_2073 | 0xb020_2073
-            )
+            ) || (insn_word & 0xfff0_007f) == 0x0150_0073)
         {
             let rd = ((insn_word >> 7) & 0x1f) as usize;
             if rd != 0 {
