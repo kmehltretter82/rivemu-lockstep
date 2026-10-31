@@ -297,6 +297,9 @@ pub fn generate_block(rng: &mut Rng, seed: u64, num_insns: usize) -> Vec<u32> {
                     i_type(0x03, 14, 0b011, 8, 0),     // ld x14, 0(x8)  (untagged alias matches x13)
                     ssamoswap_d(15, 12, 11),           // ssamoswap.d x15, x12, (x11) (masked -> SS_PAGE_VA+256)
                     i_type(0x03, 16, 0b011, 11, 0),    // ld x16, 0(x11) (masked load from SS page)
+                    i_type(0x13, 0, 0b110, 10, 0x000), // prefetch.i 0(x10)  (Zicbop)
+                    i_type(0x13, 0, 0b110, 10, 0x021), // prefetch.r 32(x10) (Zicbop)
+                    i_type(0x13, 0, 0b110, 10, 0x043), // prefetch.w 64(x10) (Zicbop)
                 ]);
             }
             Case::SvukteUserKernelTableFault => {

@@ -297,7 +297,7 @@ pub fn configure_sv48_case(seed: u64, state: &mut ArchState) -> Vec<u8> {
         &mut image,
         L3_PAGE_BASE,
         vpn_index(SV48_HIGH_BASE, 3),
-        pointer_pte(ROOT_PAGE_BASE),
+        pointer_pte(ROOT_PAGE_BASE) | (3u64 << 59), // Svrsw60t59b software-reserved PTE bits [60:59]
     );
     let high_base = if sv57 {
         put_pte(
@@ -310,7 +310,7 @@ pub fn configure_sv48_case(seed: u64, state: &mut ArchState) -> Vec<u8> {
             &mut image,
             L4_PAGE_BASE,
             vpn_index(SV57_HIGH_BASE, 4),
-            pointer_pte(L3_PAGE_BASE),
+            pointer_pte(L3_PAGE_BASE) | (2u64 << 59), // Svrsw60t59b software-reserved PTE bits [60:59]
         );
         state.satp = if case.uses_remap_asid() {
             SATP_SV57_REMAP_ASID
@@ -848,7 +848,7 @@ mod tests {
         );
         assert_eq!(
             read_pte(&image, L3_PAGE_BASE, SV48_HIGH_BASE, 3),
-            pointer_pte(ROOT_PAGE_BASE)
+            pointer_pte(ROOT_PAGE_BASE) | (3u64 << 59)
         );
 
         let mut misaligned = ArchState::default();
@@ -877,7 +877,7 @@ mod tests {
         );
         assert_eq!(
             read_pte(&sv57_image, L4_PAGE_BASE, SV57_HIGH_BASE, 4),
-            pointer_pte(L3_PAGE_BASE)
+            pointer_pte(L3_PAGE_BASE) | (2u64 << 59)
         );
 
         let mut sv57_misaligned = ArchState::default();

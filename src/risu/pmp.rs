@@ -1,7 +1,7 @@
 //! Directed and randomized Physical Memory Protection (`PMP`) lockstep cases (`Suite::Pmp`).
 
 use crate::ArchState;
-use crate::risu::encode::{EBREAK, i_type, r_type, s_type};
+use crate::risu::encode::{EBREAK, i_type, s_type};
 use crate::risu::harness::{CODE_BASE, SCRATCH_BASE};
 use crate::risu::seed::Rng;
 
@@ -13,6 +13,7 @@ const CSR_PMPADDR0: i32 = 0x3b0;
 const CSR_PMPADDR1: i32 = 0x3b1;
 const CSR_PMPADDR2: i32 = 0x3b2;
 const CSR_PMPADDR3: i32 = 0x3b3;
+const CSR_MSECCFG: i32 = 0x747;
 
 const MRET: u32 = 0x3020_0073;
 const SFENCE_VMA_ALL: u32 = 0x1200_0073;
@@ -86,6 +87,8 @@ pub fn configure_case(seed: u64, state: &mut ArchState) {
     state.mstatus &= !(MSTATUS_MPP_MASK | MSTATUS_MPRV);
     if case == Case::MprvSupervisorVsMachine {
         state.mstatus |= MSTATUS_MPP_S | MSTATUS_MPRV;
+        state.x[11] = (0x2au64 << 57) | (SCRATCH_BASE + 256);
+        state.x[26] = 2u64 << 32; // mseccfg.PMM = PMLEN_7 (Smmpm)
     } else if !use_user_mode {
         state.mstatus |= MSTATUS_MPP_S;
     }
@@ -187,7 +190,7 @@ pub fn generate_block(rng: &mut Rng, seed: u64, num_insns: usize) -> Vec<u32> {
     out.push(i_type(0x73, 0, 0b001, 25, CSR_MENVCFG));  // csrw menvcfg, x25
     out.push(SFENCE_VMA_ALL);
     if case == Case::MprvSupervisorVsMachine {
-        out.push(i_type(0x13, 0, 0b000, 0, 0)); // nop (remain in M-mode with MPRV=1, MPP=S)
+        out.push(i_type(0x73, 0, 0b001, 26, CSR_MSECCFG)); // csrw mseccfg, x26 (enable Smmpm in M-mode)
     } else {
         out.push(MRET); // drop to S-mode or U-mode at CODE_BASE + 32
     }
@@ -247,7 +250,7 @@ pub fn generate_block(rng: &mut Rng, seed: u64, num_insns: usize) -> Vec<u32> {
                 0 => i_type(0x03, rd, 0b011, 8, 0),  // ld in RO pmp0 -> ok
                 1 => s_type(0x23, 0b011, 8, rs2, 0), // 1st time: MPRV=1,MPP=S faults (mcause=7) & trap handler sets MPP=M; later times: MPP=M succeeds!
                 2 => i_type(0x03, rd, 0b011, 8, 0),  // ld in pmp0 -> observes store when MPP=M
-                _ => r_type(0x33, rd, 0b000, rs2, 8, 0x00), // add rd, rs2, s0
+                _ => i_type(0x03, rd, 0b011, 11, 0), // ld via tagged x11 (Smmpm PMLEN=7 in M-mode -> SCRATCH_BASE+256)
             },
             Case::EmptyTorRange => match slot % 4 {
                 0 => s_type(0x23, 0b011, 8, rs2, 64), // [64..128) is NOT matched by empty TOR pmp1 -> succeeds via pmp3!

@@ -1256,11 +1256,13 @@ fn gen_read_only_csr_traps(out: &mut Vec<u32>) {
 fn gen_smstateen_csrs(rng: &mut Rng, out: &mut Vec<u32>) {
     let rs1 = rng.pick_src_gpr();
     out.extend([
-        i_type(0x73, 0, 0b001, rs1, 0x30c),  // csrw  mstateen0, rs1 (WARL mask 0xc000_0000_0000_0000)
-        i_type(0x73, 29, 0b010, 0, 0x30c),   // csrr  x29, mstateen0
-        i_type(0x73, 30, 0b010, 0, 0x10c),   // csrr  x30, sstateen0 (read-only 0)
-        i_type(0x13, 31, 0b000, 0, -1),      // addi  x31, x0, -1
-        i_type(0x73, 0, 0b001, 31, 0x30c),   // csrw  mstateen0, x31 (restore SE0 | ENVCFG)
+        i_type(0x13, 28, 0b101, rs1, 62),     // srli  x28, rs1, 62 (portable SE0 | ENVCFG bits [63:62])
+        i_type(0x13, 28, 0b001, 28, 62),      // slli  x28, x28, 62
+        i_type(0x73, 0, 0b001, 28, 0x30c),    // csrw  mstateen0, x28
+        i_type(0x73, 29, 0b010, 0, 0x30c),    // csrr  x29, mstateen0
+        i_type(0x73, 30, 0b010, 0, 0x10c),    // csrr  x30, sstateen0 (read-only 0)
+        i_type(0x13, 31, 0b000, 0, -1),       // addi  x31, x0, -1
+        i_type(0x73, 0, 0b001, 31, 0x30c),    // csrw  mstateen0, x31 (restore SE0 | ENVCFG)
     ]);
 }
 
