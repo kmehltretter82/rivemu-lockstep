@@ -17,6 +17,8 @@ pub enum Suite {
     MulDiv,
     /// `Zba`, `Zbb`, `Zbc`, and `Zbs` bit-manipulation extensions.
     Bitmanip,
+    /// Scalar cryptography extensions (`Zbkb`, `Zbkc`, `Zbkx`, `Zknd`, `Zkne`, `Zknh`).
+    Crypto,
     /// IEEE-754 single (`F`) and double (`D`) floating-point arithmetic, conversions, and `fflags`.
     Float,
     /// Directed floating-point NaN boxing, rounding, fused operations, and flags.
@@ -53,6 +55,7 @@ impl Suite {
             "fencei" | "fence-i" | "smc" => Some(Self::FenceI),
             "mul" | "muldiv" | "m" => Some(Self::MulDiv),
             "bitmanip" | "zb" | "b" => Some(Self::Bitmanip),
+            "crypto" | "zk" | "zkn" | "zbkb" | "zknd" | "zkne" | "zknh" => Some(Self::Crypto),
             "float" | "fp" | "fd" => Some(Self::Float),
             "fp-edges" | "fpedges" | "float-edges" => Some(Self::FpEdges),
             "mem" | "amo" | "sandboxmem" => Some(Self::SandboxMem),
@@ -77,6 +80,7 @@ impl Suite {
             Self::FenceI => "fence-i-smc",
             Self::MulDiv => "mul-div",
             Self::Bitmanip => "bitmanip",
+            Self::Crypto => "scalar-crypto",
             Self::Float => "float-fd",
             Self::FpEdges => "fp-directed",
             Self::SandboxMem => "sandbox-mem-amo",
@@ -92,13 +96,14 @@ impl Suite {
         }
     }
 
-    /// All 16 concrete instruction/architectural suites cycled by `campaign` mode.
-    pub const CAMPAIGN_SUITES: [Self; 16] = [
+    /// All 17 concrete instruction/architectural suites cycled by `campaign` mode.
+    pub const CAMPAIGN_SUITES: [Self; 17] = [
         Self::IntAlu,
         Self::ControlFlow,
         Self::FenceI,
         Self::MulDiv,
         Self::Bitmanip,
+        Self::Crypto,
         Self::Float,
         Self::FpEdges,
         Self::SandboxMem,
@@ -134,16 +139,17 @@ pub fn generate_block(rng: &mut Rng, suite: Suite, num_insns: usize) -> Vec<u32>
     };
     while out.len() < num_insns {
         let active = match suite {
-            Suite::All => match rng.next_u64() % 10 {
+            Suite::All => match rng.next_u64() % 11 {
                 0 => Suite::IntAlu,
                 1 => Suite::ControlFlow,
                 2 => Suite::FenceI,
                 3 => Suite::MulDiv,
                 4 => Suite::Bitmanip,
-                5 => Suite::Float,
-                6 => Suite::SandboxMem,
-                7 => Suite::CsrTrap,
-                8 => Suite::FpEdges,
+                5 => Suite::Crypto,
+                6 => Suite::Float,
+                7 => Suite::SandboxMem,
+                8 => Suite::CsrTrap,
+                9 => Suite::FpEdges,
                 _ => Suite::Atomics,
             },
             other => other,
@@ -154,6 +160,7 @@ pub fn generate_block(rng: &mut Rng, suite: Suite, num_insns: usize) -> Vec<u32>
             Suite::FenceI => gen_fence_i(&mut out),
             Suite::MulDiv => out.push(gen_mul_div(rng)),
             Suite::Bitmanip => out.push(gen_bitmanip(rng)),
+            Suite::Crypto => out.push(gen_crypto(rng)),
             Suite::Float => out.push(gen_float(rng)),
             Suite::FpEdges => {
                 fp_edges::generate_case(fp_edge_selector, &mut out);
@@ -742,6 +749,45 @@ fn gen_bitmanip(rng: &mut Rng) -> u32 {
         44 => r_type(0x33, rd, 0b111, rs1, rs2, 0x07), // czero.nez
         45 => r_type(0x33, rd, 0b101, rs1, 0, 0x07),   // czero.eqz rd, rs1, x0
         _ => r_type(0x33, rd, 0b111, rs1, 0, 0x07),    // czero.nez rd, rs1, x0
+    }
+}
+
+fn gen_crypto(rng: &mut Rng) -> u32 {
+    let rd = rng.pick_gpr();
+    let rs1 = rng.pick_src_gpr();
+    let rs2 = rng.pick_src_gpr();
+    let rnum = (rng.next_u64() % 11) as i32; // valid 0..=10
+
+    match rng.next_u64() % 24 {
+        // Zbkb
+        0 => r_type(0x33, rd, 0b100, rs1, rs2, 0x04), // pack
+        1 => r_type(0x33, rd, 0b111, rs1, rs2, 0x04), // packh
+        2 => r_type(0x3b, rd, 0b100, rs1, rs2, 0x04), // packw
+        3 => i_type(0x13, rd, 0b101, rs1, 0x687),     // brev8
+        // Zbkc
+        4 => r_type(0x33, rd, 0b001, rs1, rs2, 0x05), // clmul
+        5 => r_type(0x33, rd, 0b011, rs1, rs2, 0x05), // clmulh
+        // Zbkx
+        6 => r_type(0x33, rd, 0b010, rs1, rs2, 0x14), // xperm4
+        7 => r_type(0x33, rd, 0b100, rs1, rs2, 0x14), // xperm8
+        // Zknd / Zkne
+        8 => r_type(0x33, rd, 0b000, rs1, rs2, 0x19),  // aes64es
+        9 => r_type(0x33, rd, 0b000, rs1, rs2, 0x1b),  // aes64esm
+        10 => r_type(0x33, rd, 0b000, rs1, rs2, 0x1d), // aes64ds
+        11 => r_type(0x33, rd, 0b000, rs1, rs2, 0x1f), // aes64dsm
+        12 => i_type(0x13, rd, 0b001, rs1, 0x300),     // aes64im
+        13 => i_type(0x13, rd, 0b001, rs1, 0x310 | rnum), // aes64ks1i (rnum 0..=10)
+        14 => i_type(0x13, rd, 0b001, rs1, 0x31a),     // aes64ks1i (rnum == 10, no rotation)
+        15 => r_type(0x33, rd, 0b000, rs1, rs2, 0x3f), // aes64ks2
+        // Zknh
+        16 => i_type(0x13, rd, 0b001, rs1, 0x100), // sha256sum0
+        17 => i_type(0x13, rd, 0b001, rs1, 0x101), // sha256sum1
+        18 => i_type(0x13, rd, 0b001, rs1, 0x102), // sha256sig0
+        19 => i_type(0x13, rd, 0b001, rs1, 0x103), // sha256sig1
+        20 => i_type(0x13, rd, 0b001, rs1, 0x104), // sha512sum0
+        21 => i_type(0x13, rd, 0b001, rs1, 0x105), // sha512sum1
+        22 => i_type(0x13, rd, 0b001, rs1, 0x106), // sha512sig0
+        _ => i_type(0x13, rd, 0b001, rs1, 0x107),  // sha512sig1
     }
 }
 

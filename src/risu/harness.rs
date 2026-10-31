@@ -1253,6 +1253,6 @@ mod tests {
         assert!(rust_test.contains("fn regression_rv64c_0x0000000000004321_step_0()"));
         assert!(rust_test.contains("RivemuTarget::new_bare(true)"));
         assert!(rust_test.contains("target.step_one().unwrap();"));
-        assert_eq!(Suite::CAMPAIGN_SUITES.len(), 16);
+        assert_eq!(Suite::CAMPAIGN_SUITES.len(), 17);
     }
 }

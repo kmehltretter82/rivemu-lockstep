@@ -68,7 +68,7 @@ Usage:
 
 RISU / Campaign Options:
   --reference <sail|qemu>                       Reference model [default: sail]
-  --suite <alu|control|fence-i|mul|bitmanip|float|fp-edges|mem|csr|privileged|sv39|sv48|pmp|cfi|atomics|compressed|all>
+  --suite <alu|control|fence-i|mul|bitmanip|crypto|float|fp-edges|mem|csr|privileged|sv39|sv48|pmp|cfi|atomics|compressed|all>
                                                  Instruction suite [default: all]
   --blocks <N>                                   Number of random blocks [default: 50]
   --workers <N>                                  Parallel worker threads for campaign mode [default: 2]
