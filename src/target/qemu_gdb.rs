@@ -18,6 +18,12 @@ const PRIV_GDB_REG: u32 = 65;
 /// Time allowed for QEMU to open its GDB socket on a loaded host.
 const QEMU_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// QEMU `-cpu` model matching rivemu's ISA (RV64GCV, VLEN = 256, and the
+/// RVA23 extensions rivemu implements), with PMP disabled.
+pub const QEMU_CPU: &str = "rv64,c=true,v=true,vlen=256,elen=64,h=false,pmp=false,smstateen=true,sv57=true,svnapot=true,zawrs=true,zabha=true,zacas=true,zba=true,zbb=true,zbc=true,zbkb=true,zbkc=true,zbkx=true,zbs=true,zca=true,zcb=true,zcd=true,zcmop=true,zfa=true,zfbfmin=true,zfh=true,zfhmin=true,zicfilp=true,zicfiss=true,zicond=true,zicbom=true,zicbop=true,zicboz=true,zimop=true,zknd=true,zkne=true,zknh=true,zkr=true,zksed=true,zksh=true,zkt=true,ssdbltrp=true,ssnpm=true,smnpm=true,smmpm=true,x-svukte=true,svinval=true,svpbmt=true,svrsw60t59b=true,svvptc=true,sstc=true";
+/// [`QEMU_CPU`] with 16 PMP entries and Smepmp.
+pub const QEMU_CPU_PMP: &str = "rv64,c=true,v=true,vlen=256,elen=64,h=false,pmp=true,smepmp=true,smstateen=true,sv57=true,svnapot=true,zawrs=true,zabha=true,zacas=true,zba=true,zbb=true,zbc=true,zbkb=true,zbkc=true,zbkx=true,zbs=true,zca=true,zcb=true,zcd=true,zcmop=true,zfa=true,zfbfmin=true,zfh=true,zfhmin=true,zicfilp=true,zicfiss=true,zicond=true,zicbom=true,zicbop=true,zicboz=true,zimop=true,zknd=true,zkne=true,zknh=true,zkr=true,zksed=true,zksh=true,zkt=true,ssdbltrp=true,ssnpm=true,smnpm=true,smmpm=true,x-svukte=true,svinval=true,svpbmt=true,svrsw60t59b=true,svvptc=true,sstc=true";
+
 /// Persistent `qemu-system-riscv64` process controlled via GDB RSP.
 pub struct QemuGdbTarget {
     child: Child,
@@ -44,11 +50,7 @@ impl QemuGdbTarget {
 
     /// Spawns a bare-metal `qemu-system-riscv64` instance (`-bios none`) with configurable PMP support.
     pub fn spawn_bare_with_pmp(qemu_bin: &Path, pmp_enabled: bool) -> Result<Self, TargetError> {
-        let cpu_arg = if pmp_enabled {
-            "rv64,c=true,v=true,vlen=256,elen=64,h=false,pmp=true,smepmp=true,smstateen=true,sv57=true,svnapot=true,zawrs=true,zabha=true,zacas=true,zba=true,zbb=true,zbc=true,zbkb=true,zbkc=true,zbkx=true,zbs=true,zca=true,zcb=true,zcd=true,zcmop=true,zfa=true,zfbfmin=true,zfh=true,zfhmin=true,zicfilp=true,zicfiss=true,zicond=true,zicbom=true,zicbop=true,zicboz=true,zimop=true,zknd=true,zkne=true,zknh=true,zkr=true,zksed=true,zksh=true,zkt=true,ssdbltrp=true,ssnpm=true,smnpm=true,smmpm=true,x-svukte=true,svinval=true,svpbmt=true,svrsw60t59b=true,svvptc=true,sstc=true"
-        } else {
-            "rv64,c=true,v=true,vlen=256,elen=64,h=false,pmp=false,smstateen=true,sv57=true,svnapot=true,zawrs=true,zabha=true,zacas=true,zba=true,zbb=true,zbc=true,zbkb=true,zbkc=true,zbkx=true,zbs=true,zca=true,zcb=true,zcd=true,zcmop=true,zfa=true,zfbfmin=true,zfh=true,zfhmin=true,zicfilp=true,zicfiss=true,zicond=true,zicbom=true,zicbop=true,zicboz=true,zimop=true,zknd=true,zkne=true,zknh=true,zkr=true,zksed=true,zksh=true,zkt=true,ssdbltrp=true,ssnpm=true,smnpm=true,smmpm=true,x-svukte=true,svinval=true,svpbmt=true,svrsw60t59b=true,svvptc=true,sstc=true"
-        };
+        let cpu_arg = if pmp_enabled { QEMU_CPU_PMP } else { QEMU_CPU };
         let mut target = Self::spawn_with_args(
             qemu_bin,
             &[
