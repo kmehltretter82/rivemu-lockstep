@@ -9,6 +9,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -42,6 +43,13 @@ const MIDELEG_GDB_REG: u32 = 81;
 const SENVCFG_GDB_REG: u32 = 82;
 const DEFAULT_MEMORY_CHUNK: usize = 1024;
 const MAX_MEMORY_CHUNK: usize = 2048;
+const SAIL_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+// Overlapping Sail startups in multi-worker campaigns intermittently end in
+// "Connection reset by peer". The cause is not yet identified: choosing ports
+// outside the OS ephemeral range did not avoid it. Until it is, serialize each
+// startup from port selection to the first successful connection. This roughly
+// halves Sail campaign throughput.
+static SAIL_SPAWN_LOCK: Mutex<()> = Mutex::new(());
 /// Address of the bootstrap used to install `mtvec` in stock Sail.
 pub const SAIL_BOOTSTRAP_BASE: u64 = 0x8000_3000;
 static TEMP_ELF_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -227,6 +235,9 @@ impl SailGdbTarget {
             ));
         }
 
+        let spawn_guard = SAIL_SPAWN_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let port = pick_free_port()?;
         let mut command = Command::new(sail_bin);
         command
@@ -240,7 +251,7 @@ impl SailGdbTarget {
             .stderr(Stdio::null());
 
         let mut child = command.spawn()?;
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + SAIL_STARTUP_TIMEOUT;
         let stream = loop {
             if let Some(status) = child.try_wait()? {
                 return Err(TargetError::Protocol(format!(
@@ -255,10 +266,14 @@ impl SailGdbTarget {
                 Err(error) => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(TargetError::Io(error));
+                    return Err(TargetError::Protocol(format!(
+                        "Sail RISC-V did not open its GDB server on port {port} within {}s: {error}",
+                        SAIL_STARTUP_TIMEOUT.as_secs()
+                    )));
                 }
             }
         };
+        drop(spawn_guard);
         stream.set_nodelay(true)?;
         stream.set_read_timeout(Some(Duration::from_secs(10)))?;
         stream.set_write_timeout(Some(Duration::from_secs(10)))?;
