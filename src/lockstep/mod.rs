@@ -27,6 +27,7 @@ impl Drop for TempDtb {
 
 /// Runs an instruction-by-instruction lockstep verification for `bios`, with an optional
 /// `kernel` staged in memory, across M/S/U privilege transitions and `Sv39`/`Sv48` translation.
+/// `pmp` gives QEMU the 16 PMP entries rivemu implements; pass `true` for real firmware.
 ///
 /// This stops only if `wfi` is reached (`RivemuTarget::step_one` steps a hart without ticking
 /// asynchronous device timers).
@@ -36,6 +37,7 @@ pub fn run_firmware_lockstep(
     kernel: Option<&Path>,
     max_steps: usize,
     check_csrs: bool,
+    pmp: bool,
 ) -> Result<Option<BisectReport>, TargetError> {
     let cfg = MachineConfig {
         ram_size: 128 * MIB,
@@ -70,7 +72,16 @@ pub fn run_firmware_lockstep(
         "-machine",
         "virt",
         "-cpu",
-        crate::target::qemu_gdb::QEMU_CPU,
+        // rivemu always implements 16 PMP entries (and Smepmp), and real
+        // firmware such as OpenSBI probes and programs them, so QEMU needs
+        // PMP too. Synthetic images that never program PMP use a PMP-less
+        // QEMU: with PMP present and no matching entry the spec denies S/U
+        // accesses, which rivemu only enforces in -strict mode.
+        if pmp {
+            crate::target::qemu_gdb::QEMU_CPU_PMP
+        } else {
+            crate::target::qemu_gdb::QEMU_CPU
+        },
         "-m",
         "128M",
         "-smp",
@@ -312,7 +323,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::write(&bios_path, &image).unwrap();
-        let res = run_firmware_lockstep(qemu_bin, &bios_path, None, 32, true);
+        let res = run_firmware_lockstep(qemu_bin, &bios_path, None, 32, true, false);
         let _ = std::fs::remove_file(&bios_path);
 
         let report = res.expect("firmware lockstep should succeed");
@@ -375,7 +386,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::write(&bios_path, &image).unwrap();
-        let res = run_firmware_lockstep(qemu_bin, &bios_path, None, 28, true);
+        let res = run_firmware_lockstep(qemu_bin, &bios_path, None, 28, true, false);
         let _ = std::fs::remove_file(&bios_path);
 
         let report = res.expect("device-aware firmware lockstep should succeed");

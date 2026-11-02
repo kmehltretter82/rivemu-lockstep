@@ -247,7 +247,14 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         };
         let t0 = Instant::now();
-        match run_firmware_lockstep(&qemu_bin, &bios_path, kernel.as_deref(), steps, check_csrs) {
+        match run_firmware_lockstep(
+            &qemu_bin,
+            &bios_path,
+            kernel.as_deref(),
+            steps,
+            check_csrs,
+            true,
+        ) {
             Ok(None) => {
                 println!(
                     "PASS: early boot CPU lockstep completed {} instructions in {:.2?} with 0 divergences.",
