@@ -105,12 +105,12 @@ pub(crate) const RET_INSN: u32 = i_type(0x67, 0, 0, 1, 0);
 
 const REMAP_INSN_LEN: usize = 8;
 const INSN_PAGE_FAULT_SEQUENCE: [u32; 6] = [
-    i_type(0x67, 1, 0, 9, -4),      // jalr x1, x9, -4: fault at INSN_FAULT_VA (PTE_X = 0)
-    i_type(0x03, 0, 0b011, 13, 0),  // ld x0, 0(x13): prewarm PTE-page translation
+    i_type(0x67, 1, 0, 9, -4), // jalr x1, x9, -4: fault at INSN_FAULT_VA (PTE_X = 0)
+    i_type(0x03, 0, 0b011, 13, 0), // ld x0, 0(x13): prewarm PTE-page translation
     s_type(0x23, 0b011, 13, 14, 0), // sd x14, 0(x13): rewrite PROBE_VA to U+X leaf PTE
     r_type(0x73, 0, 0, 8, 0, 0x09), // sfence.vma x8, x0
-    i_type(0x03, 10, 0b011, 8, 0),  // ld x10, 0(x8): S-mode SUM=1 data load succeeds on U page
-    i_type(0x67, 1, 0, 9, -4),      // jalr x1, x9, -4: fault at INSN_FAULT_VA (U page in S-mode)
+    i_type(0x03, 10, 0b011, 8, 0), // ld x10, 0(x8): S-mode SUM=1 data load succeeds on U page
+    i_type(0x67, 1, 0, 9, -4), // jalr x1, x9, -4: fault at INSN_FAULT_VA (U page in S-mode)
 ];
 
 const fn sfence_remap_sequence(rs1: u8, rs2: u8) -> [u32; REMAP_INSN_LEN] {
@@ -235,10 +235,8 @@ pub fn configure_case(seed: u64, state: &mut ArchState) -> Vec<u8> {
     // The identity scratch mapping is used only for debugger observation. U
     // cases make it a U page; keep SUM set so the same mapping remains readable
     // while a fault has temporarily entered the S-mode recovery handler.
-    if matches!(
-        case,
-        Case::SupervisorUserSumOn | Case::InstructionPageFault
-    ) || case.starts_in_user()
+    if matches!(case, Case::SupervisorUserSumOn | Case::InstructionPageFault)
+        || case.starts_in_user()
     {
         state.mstatus |= MSTATUS_SUM;
         state.sstatus |= MSTATUS_SUM;
@@ -286,7 +284,14 @@ pub fn configure_sv48_case(seed: u64, state: &mut ArchState) -> Vec<u8> {
     let case = Case::from_seed(seed);
     let sv57 = is_sv57_seed(seed);
     let mut image = configure_case(seed, state);
-    image.resize(if sv57 { SV57_VM_SETUP_LEN } else { SV48_VM_SETUP_LEN }, 0);
+    image.resize(
+        if sv57 {
+            SV57_VM_SETUP_LEN
+        } else {
+            SV48_VM_SETUP_LEN
+        },
+        0,
+    );
     put_pte(
         &mut image,
         L3_PAGE_BASE,
@@ -771,7 +776,10 @@ mod tests {
         assert_eq!(mprv_state.prv, 3);
         assert_eq!(mprv_state.x[8], PROBE_VA);
         assert_ne!(mprv_state.mstatus & MSTATUS_MPRV, 0);
-        assert_eq!(mprv_state.mstatus & MSTATUS_MPP_MASK, MSTATUS_MPP_SUPERVISOR);
+        assert_eq!(
+            mprv_state.mstatus & MSTATUS_MPP_MASK,
+            MSTATUS_MPP_SUPERVISOR
+        );
         assert_eq!(read_pte(&mprv_image, L0_PAGE_BASE, CODE_BASE, 0) & PTE_X, 0);
     }
 
@@ -787,10 +795,7 @@ mod tests {
         assert_eq!(state.x[9], EXEC_ALIAS_VA);
         assert_eq!(state.x[13], PROBE_PTE_ADDR);
         assert_eq!(state.x[14], USER_EXEC_PROBE_PTE);
-        assert_eq!(
-            u32::from_le_bytes(image[..4].try_into().unwrap()),
-            RET_INSN
-        );
+        assert_eq!(u32::from_le_bytes(image[..4].try_into().unwrap()), RET_INSN);
         assert_eq!(
             read_pte(&image, L0_PAGE_BASE, PROBE_VA, 0),
             INITIAL_PROBE_PTE

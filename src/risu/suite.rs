@@ -276,16 +276,16 @@ pub fn generate_compressed_block(rng: &mut Rng, num_insns: usize) -> Vec<u16> {
             // Zcb compressed loads, stores, unary extensions, and multiply:
             34 => encode_zcb_byte_mem(false, compact_dest(rng), (rng.next_u64() & 3) as u8), // C.LBU
             35 => encode_zcb_byte_mem(true, compact_dest(rng), (rng.next_u64() & 3) as u8),  // C.SB
-            36 => encode_zcb_half_mem(0, compact_dest(rng), (rng.next_u64() & 1) as u8),     // C.LHU
-            37 => encode_zcb_half_mem(1, compact_dest(rng), (rng.next_u64() & 1) as u8),     // C.LH
-            38 => encode_zcb_half_mem(2, compact_dest(rng), (rng.next_u64() & 1) as u8),     // C.SH
-            39 => encode_ca(1, 0b10, compact_dest(rng), compact_src(rng)),                   // C.MUL
-            40 => encode_ca(1, 0b11, compact_dest(rng), 0b000),                              // C.ZEXT.B
-            41 => encode_ca(1, 0b11, compact_dest(rng), 0b001),                              // C.SEXT.B
-            42 => encode_ca(1, 0b11, compact_dest(rng), 0b010),                              // C.ZEXT.H
-            43 => encode_ca(1, 0b11, compact_dest(rng), 0b011),                              // C.SEXT.H
-            44 => encode_ca(1, 0b11, compact_dest(rng), 0b100),                              // C.ZEXT.W
-            45 => encode_ca(1, 0b11, compact_dest(rng), 0b101),                              // C.NOT
+            36 => encode_zcb_half_mem(0, compact_dest(rng), (rng.next_u64() & 1) as u8), // C.LHU
+            37 => encode_zcb_half_mem(1, compact_dest(rng), (rng.next_u64() & 1) as u8), // C.LH
+            38 => encode_zcb_half_mem(2, compact_dest(rng), (rng.next_u64() & 1) as u8), // C.SH
+            39 => encode_ca(1, 0b10, compact_dest(rng), compact_src(rng)),               // C.MUL
+            40 => encode_ca(1, 0b11, compact_dest(rng), 0b000),                          // C.ZEXT.B
+            41 => encode_ca(1, 0b11, compact_dest(rng), 0b001),                          // C.SEXT.B
+            42 => encode_ca(1, 0b11, compact_dest(rng), 0b010),                          // C.ZEXT.H
+            43 => encode_ca(1, 0b11, compact_dest(rng), 0b011),                          // C.SEXT.H
+            44 => encode_ca(1, 0b11, compact_dest(rng), 0b100),                          // C.ZEXT.W
+            45 => encode_ca(1, 0b11, compact_dest(rng), 0b101),                          // C.NOT
             // Zcmop compressed may-be-operations (C.MOP.3,5,7,9,11,13,15; exclude 1 and 5 which are C.SSPUSH/C.SSPOPCHK):
             _ => {
                 const ZCMOP_RD: [u8; 6] = [3, 7, 9, 11, 13, 15];
@@ -488,7 +488,10 @@ fn encode_cr(high_bit: u16, rd: u8, rs2: u8) -> u16 {
 }
 
 fn encode_compact_mem(funct3: u16, reg_prime: u8, offset: u16) -> u16 {
-    debug_assert!(matches!(funct3, 0b001 | 0b010 | 0b011 | 0b101 | 0b110 | 0b111));
+    debug_assert!(matches!(
+        funct3,
+        0b001 | 0b010 | 0b011 | 0b101 | 0b110 | 0b111
+    ));
     debug_assert!(reg_prime > 0 && reg_prime < 8);
     let offset_bits = if funct3 == 0b010 || funct3 == 0b110 {
         debug_assert!(offset <= 124 && offset % 4 == 0);
@@ -780,13 +783,13 @@ fn gen_crypto(rng: &mut Rng) -> u32 {
         6 => r_type(0x33, rd, 0b010, rs1, rs2, 0x14), // xperm4
         7 => r_type(0x33, rd, 0b100, rs1, rs2, 0x14), // xperm8
         // Zknd / Zkne
-        8 => r_type(0x33, rd, 0b000, rs1, rs2, 0x19),  // aes64es
-        9 => r_type(0x33, rd, 0b000, rs1, rs2, 0x1b),  // aes64esm
+        8 => r_type(0x33, rd, 0b000, rs1, rs2, 0x19), // aes64es
+        9 => r_type(0x33, rd, 0b000, rs1, rs2, 0x1b), // aes64esm
         10 => r_type(0x33, rd, 0b000, rs1, rs2, 0x1d), // aes64ds
         11 => r_type(0x33, rd, 0b000, rs1, rs2, 0x1f), // aes64dsm
-        12 => i_type(0x13, rd, 0b001, rs1, 0x300),     // aes64im
+        12 => i_type(0x13, rd, 0b001, rs1, 0x300),    // aes64im
         13 => i_type(0x13, rd, 0b001, rs1, 0x310 | rnum), // aes64ks1i (rnum 0..=10)
-        14 => i_type(0x13, rd, 0b001, rs1, 0x31a),     // aes64ks1i (rnum == 10, no rotation)
+        14 => i_type(0x13, rd, 0b001, rs1, 0x31a),    // aes64ks1i (rnum == 10, no rotation)
         15 => r_type(0x33, rd, 0b000, rs1, rs2, 0x3f), // aes64ks2
         // Zknh
         16 => i_type(0x13, rd, 0b001, rs1, 0x100), // sha256sum0
@@ -854,7 +857,14 @@ fn gen_float(rng: &mut Rng) -> u32 {
         28 => r4_type(0x4b, fd, rm, fs1, fs2, fs3, f7_fmt), // fnmsub.s/d/h
         29 => r4_type(0x4f, fd, rm, fs1, fs2, fs3, f7_fmt), // fnmadd.s/d/h
         // Zfa
-        30 => r_type(0x53, fd, 0b000, (rng.next_u64() & 0x1f) as u8, 1, 0x78 | f7_fmt), // fli.s/d/h
+        30 => r_type(
+            0x53,
+            fd,
+            0b000,
+            (rng.next_u64() & 0x1f) as u8,
+            1,
+            0x78 | f7_fmt,
+        ), // fli.s/d/h
         31 => r_type(0x53, fd, 0b010, fs1, fs2, 0x14 | f7_fmt), // fminm.s/d/h
         32 => r_type(0x53, fd, 0b011, fs1, fs2, 0x14 | f7_fmt), // fmaxm.s/d/h
         33 => r_type(0x53, fd, rm, fs1, 4, 0x20 | f7_fmt),      // fround.s/d/h
@@ -863,12 +873,12 @@ fn gen_float(rng: &mut Rng) -> u32 {
         36 => r_type(0x53, rd, 0b100, fs1, fs2, 0x50 | f7_fmt), // fleq.s/d/h
         37 => r_type(0x53, rd, 0b101, fs1, fs2, 0x50 | f7_fmt), // fltq.s/d/h
         // Zfh / Zfhmin / Zfbfmin format conversions
-        38 => r_type(0x53, fd, rm, fs1, 2, 0x20),    // fcvt.s.h
-        39 => r_type(0x53, fd, rm, fs1, 0, 0x22),    // fcvt.h.s
-        40 => r_type(0x53, fd, rm, fs1, 2, 0x21),    // fcvt.d.h
-        41 => r_type(0x53, fd, rm, fs1, 1, 0x22),    // fcvt.h.d
-        42 => r_type(0x53, fd, rm, fs1, 6, 0x20),    // fcvt.s.bf16
-        _ => r_type(0x53, fd, rm, fs1, 8, 0x22),     // fcvt.bf16.s
+        38 => r_type(0x53, fd, rm, fs1, 2, 0x20), // fcvt.s.h
+        39 => r_type(0x53, fd, rm, fs1, 0, 0x22), // fcvt.h.s
+        40 => r_type(0x53, fd, rm, fs1, 2, 0x21), // fcvt.d.h
+        41 => r_type(0x53, fd, rm, fs1, 1, 0x22), // fcvt.h.d
+        42 => r_type(0x53, fd, rm, fs1, 6, 0x20), // fcvt.s.bf16
+        _ => r_type(0x53, fd, rm, fs1, 8, 0x22),  // fcvt.bf16.s
     }
 }
 
@@ -952,9 +962,9 @@ fn gen_sandbox_mem(rng: &mut Rng, out: &mut Vec<u32>) {
         44 => r_type(0x2f, rd.max(9), 0b000, 5, rs2, 0b001_0100), // amocas.b
         45 => r_type(0x2f, rd.max(9), 0b001, 5, rs2, 0b001_0100), // amocas.h
         46 => r_type(0x2f, rd.max(9), 0b010, 5, rs2, 0b001_0100), // amocas.w
-        47 => i_type(0x07, fd, 0b001, 5, unaligned_off),    // flh fd, off(t0)
-        48 => s_type(0x27, 0b001, 5, fs2, unaligned_off),   // fsh fs2, off(t0)
-        _ => i_type(0x0f, 0, 0b010, 5, 0x004),              // cbo.zero 0(t0)
+        47 => i_type(0x07, fd, 0b001, 5, unaligned_off),   // flh fd, off(t0)
+        48 => s_type(0x27, 0b001, 5, fs2, unaligned_off),  // fsh fs2, off(t0)
+        _ => i_type(0x0f, 0, 0b010, 5, 0x004),             // cbo.zero 0(t0)
     };
     out.push(insn);
 }
@@ -1197,9 +1207,9 @@ fn gen_privileged_case(selector: usize, rng: &mut Rng) -> u32 {
         4 => i_type(0x73, rd, 0b010, 0, 0x100),              // CSRRS sstatus
         5 => i_type(0x73, rd, 0b010, 0, 0x180),              // CSRRS satp
         6 => 0x1200_0073,                                    // SFENCE.VMA x0, x0
-        7 => i_type(0x73, rd, 0b001, 0, 0x015),              // CSRRW rd, seed, x0 (traps in S/U when SSEED/USEED=0)
-        8 => i_type(0x73, rd, 0b010, 0, 0x015),              // CSRRS rd, seed, x0 (read-only access to seed always traps)
-        _ => i_type(0x73, 0, 0b001, 0, 0x100),               // CSRW sstatus, x0
+        7 => i_type(0x73, rd, 0b001, 0, 0x015), // CSRRW rd, seed, x0 (traps in S/U when SSEED/USEED=0)
+        8 => i_type(0x73, rd, 0b010, 0, 0x015), // CSRRS rd, seed, x0 (read-only access to seed always traps)
+        _ => i_type(0x73, 0, 0b001, 0, 0x100),  // CSRW sstatus, x0
     }
 }
 
@@ -1264,13 +1274,13 @@ fn gen_read_only_csr_traps(out: &mut Vec<u32>) {
 fn gen_smstateen_csrs(rng: &mut Rng, out: &mut Vec<u32>) {
     let rs1 = rng.pick_src_gpr();
     out.extend([
-        i_type(0x13, 28, 0b101, rs1, 62),     // srli  x28, rs1, 62 (portable SE0 | ENVCFG bits [63:62])
-        i_type(0x13, 28, 0b001, 28, 62),      // slli  x28, x28, 62
-        i_type(0x73, 0, 0b001, 28, 0x30c),    // csrw  mstateen0, x28
-        i_type(0x73, 29, 0b010, 0, 0x30c),    // csrr  x29, mstateen0
-        i_type(0x73, 30, 0b010, 0, 0x10c),    // csrr  x30, sstateen0 (read-only 0)
-        i_type(0x13, 31, 0b000, 0, -1),       // addi  x31, x0, -1
-        i_type(0x73, 0, 0b001, 31, 0x30c),    // csrw  mstateen0, x31 (restore SE0 | ENVCFG)
+        i_type(0x13, 28, 0b101, rs1, 62), // srli  x28, rs1, 62 (portable SE0 | ENVCFG bits [63:62])
+        i_type(0x13, 28, 0b001, 28, 62),  // slli  x28, x28, 62
+        i_type(0x73, 0, 0b001, 28, 0x30c), // csrw  mstateen0, x28
+        i_type(0x73, 29, 0b010, 0, 0x30c), // csrr  x29, mstateen0
+        i_type(0x73, 30, 0b010, 0, 0x10c), // csrr  x30, sstateen0 (read-only 0)
+        i_type(0x13, 31, 0b000, 0, -1),   // addi  x31, x0, -1
+        i_type(0x73, 0, 0b001, 31, 0x30c), // csrw  mstateen0, x31 (restore SE0 | ENVCFG)
     ]);
 }
 

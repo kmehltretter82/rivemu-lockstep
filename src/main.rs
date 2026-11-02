@@ -450,7 +450,10 @@ fn emit_divergence_report(report: &BisectReport, emit_repro: Option<&Path>) {
     #[allow(clippy::collapsible_if)]
     if let Some(path) = emit_repro {
         if let Err(error) = std::fs::write(path, &rust_test) {
-            eprintln!("warning: could not write reproducer to {}: {error}", path.display());
+            eprintln!(
+                "warning: could not write reproducer to {}: {error}",
+                path.display()
+            );
         }
     }
 }

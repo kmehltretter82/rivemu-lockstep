@@ -104,8 +104,16 @@ impl QemuGdbTarget {
             sync_csrs: true,
             pmp_enabled: false,
             no_ack_mode: false,
-            priv_gdb_reg: if has_v { PRIV_GDB_REG + 32 } else { PRIV_GDB_REG },
-            csr_gdb_base: if has_v { CSR_GDB_BASE + 32 } else { CSR_GDB_BASE },
+            priv_gdb_reg: if has_v {
+                PRIV_GDB_REG + 32
+            } else {
+                PRIV_GDB_REG
+            },
+            csr_gdb_base: if has_v {
+                CSR_GDB_BASE + 32
+            } else {
+                CSR_GDB_BASE
+            },
         };
         let supported = target.cmd("qSupported:multiprocess+;xmlRegisters=i386")?;
         if supported
@@ -615,10 +623,7 @@ mod tests {
             let r_state = rivemu.get_state().unwrap();
             let q_state = qemu.get_state().unwrap();
             let diffs = r_state.diff(&q_state, true);
-            assert!(
-                diffs.is_empty(),
-                "phase 1 step {step} diverged: {diffs:?}"
-            );
+            assert!(diffs.is_empty(), "phase 1 step {step} diverged: {diffs:?}");
         }
         let post_p1 = rivemu.get_state().unwrap();
         assert_eq!(post_p1.x[11], 1); // sc.d after wrs.nto failed
@@ -638,10 +643,7 @@ mod tests {
             let r_state = rivemu.get_state().unwrap();
             let q_state = qemu.get_state().unwrap();
             let diffs = r_state.diff(&q_state, true);
-            assert!(
-                diffs.is_empty(),
-                "phase 2 step {step} diverged: {diffs:?}"
-            );
+            assert!(diffs.is_empty(), "phase 2 step {step} diverged: {diffs:?}");
         }
         let post_p2 = rivemu.get_state().unwrap();
         assert_eq!(post_p2.pc, trap_base);

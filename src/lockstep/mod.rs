@@ -262,18 +262,22 @@ mod tests {
 
         // 0x0060: S-mode entry under Sv39 translation
         emit32(&mut image, 0x0060, 0x1200_0073); // sfence.vma x0, x0
-        emit16(&mut image, 0x0064, 0x4515);      // c.li a0, 5
-        emit16(&mut image, 0x0066, 0x0509);      // c.addi a0, 2             (a0 = 7)
-        emit16(&mut image, 0x0068, 0x4581);      // c.li a1, 0
-        emit16(&mut image, 0x006a, 0x0001);      // c.nop
-        emit32(&mut image, 0x006c, 0x0e05_d633 | (11 << 20) | (10 << 15) | (12 << 7)); // czero.eqz a2, a0, a1 -> 0
+        emit16(&mut image, 0x0064, 0x4515); // c.li a0, 5
+        emit16(&mut image, 0x0066, 0x0509); // c.addi a0, 2             (a0 = 7)
+        emit16(&mut image, 0x0068, 0x4581); // c.li a1, 0
+        emit16(&mut image, 0x006a, 0x0001); // c.nop
+        emit32(
+            &mut image,
+            0x006c,
+            0x0e05_d633 | (11 << 20) | (10 << 15) | (12 << 7),
+        ); // czero.eqz a2, a0, a1 -> 0
         emit32(&mut image, 0x0070, 0x0000_0073); // ecall -> S-mode stvec @ 0x8000_0100
-        emit16(&mut image, 0x0074, 0x0505);      // c.addi a0, 1             (a0 = 8)
-        emit16(&mut image, 0x0076, 0xa001);      // c.j 0x8000_0076 (infinite loop)
+        emit16(&mut image, 0x0074, 0x0505); // c.addi a0, 1             (a0 = 8)
+        emit16(&mut image, 0x0076, 0xa001); // c.j 0x8000_0076 (infinite loop)
 
         // 0x0100: S-mode trap handler under Sv39 translation
         emit32(&mut image, 0x0100, 0x1410_22f3); // csrr t0, sepc
-        emit16(&mut image, 0x0104, 0x0291);      // c.addi t0, 4
+        emit16(&mut image, 0x0104, 0x0291); // c.addi t0, 4
         emit32(&mut image, 0x0106, 0x1412_9073); // csrw sepc, t0
         emit32(&mut image, 0x010a, 0x1020_0073); // sret
 
