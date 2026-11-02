@@ -6,10 +6,17 @@
 
 - Rust 1.85 or newer.
 - A sibling `../qemu_rust` rivemu checkout. The current `Cargo.toml` uses path dependencies from that directory.
-- Sail RISC-V 0.16 (`sail_riscv_sim`). The official macOS ARM64 release works without modification for normal register and memory comparison.
-- Optional: `qemu-system-riscv64` with TCG and the GDB stub. QEMU master is preferred for manually replaying the same seed as an independent third implementation and is required by `boot` mode.
+- Sail RISC-V 0.16 (`sail_riscv_sim`). The official macOS ARM64 release works without modification for normal register and memory comparison; privileged suites need the [debug-v1 patch](docs/sail-riscv-debug-v1.md).
+- `qemu-system-riscv64` with TCG and the GDB stub. The QEMU CPU model enables recent extensions (for example `ssdbltrp`, `smmpm`, `x-svukte`), so QEMU 11 or newer is required; Ubuntu 24.04's `qemu-system-misc` (8.2) cannot run the suites. `boot` mode always needs QEMU.
 
-The CLI first looks for the patched workspace copy at `../third_party/sail-riscv-0.16-debug-v1/bin/sail_riscv_sim`, then the official copy at `../third_party/sail-riscv-0.16/bin/sail_riscv_sim`, then `PATH`. Pass `--sail <PATH>` to select another build. For QEMU, it uses `/opt/homebrew/bin/qemu-system-riscv64` when present and otherwise searches `PATH`.
+On Ubuntu 24.04 x86_64, `scripts/setup-toolchain.sh` builds QEMU 11.1.3 (riscv64-softmmu only) and the patched Sail into `../third_party` (about 35-40 minutes on 4 cores; already-built tools are reused). CI uses the same script.
+
+Tool lookup:
+
+- Sail: `--sail <PATH>`, then `$RIVEMU_LOCKSTEP_SAIL`, then `../third_party/sail-riscv-0.16-debug-v1/bin/sail_riscv_sim`, then `../third_party/sail-riscv-0.16/bin/sail_riscv_sim`, then `PATH`.
+- QEMU: `--qemu <PATH>`, then `$RIVEMU_LOCKSTEP_QEMU`, then `PATH`.
+
+Tests that need QEMU or Sail print a `skipping ...` line when the tool is missing. Set `RIVEMU_LOCKSTEP_REQUIRE_QEMU=1` and `RIVEMU_LOCKSTEP_REQUIRE_SAIL=1` to make a missing tool a failure, as CI does. `RIVEMU_LOCKSTEP_STRESS=1` enables `tests/spawn_stress.rs`, which starts 240 QEMU and 240 Sail targets from six threads to check reference-model startup under contention.
 
 ## Build
 
@@ -39,7 +46,7 @@ target/release/rivemu-lockstep risu \
   --insns 32 \
   --seed 0x1000 \
   --step-check \
-  --qemu ../qemu/build-d7314928-arm-plain/qemu-system-riscv64
+  --qemu ../third_party/qemu-11.1.3/bin/qemu-system-riscv64
 ```
 
 Available suites are:
@@ -91,7 +98,7 @@ target/release/rivemu-lockstep boot \
   --kernel ../qemu_rust/images/linux-test/Image \
   --steps 100 \
   --check-csrs \
-  --qemu ../qemu/build-d7314928-riscv64/qemu-system-riscv64
+  --qemu ../third_party/qemu-11.1.3/bin/qemu-system-riscv64
 ```
 
 Start with a small step count because QEMU is controlled over its GDB remote protocol. Add `--check-csrs` for a short privileged-state comparison after the basic smoke test passes.

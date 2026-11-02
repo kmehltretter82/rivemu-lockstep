@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      rivemu_ref:
+        description: rivemu branch, tag, or commit to test against (default main)
+        required: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: rivemu-lockstep
+      - name: Choose rivemu ref
+        id: rivemu
+        run: rivemu-lockstep/scripts/ci-rivemu-ref.sh "${{ inputs.rivemu_ref }}" "${{ github.head_ref || github.ref_name }}" >> "$GITHUB_OUTPUT"
+      # The path dependencies expect rivemu in the sibling directory ../qemu_rust.
+      - uses: actions/checkout@v5
+        with:
+          repository: kmehltretter82/rivemu
+          ref: ${{ steps.rivemu.outputs.ref }}
+          path: qemu_rust
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rivemu-lockstep
+      - working-directory: rivemu-lockstep
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets
+          cargo test
+
+  msrv:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: rivemu-lockstep
+      - name: Choose rivemu ref
+        id: rivemu
+        run: rivemu-lockstep/scripts/ci-rivemu-ref.sh "${{ inputs.rivemu_ref }}" "${{ github.head_ref || github.ref_name }}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v5
+        with:
+          repository: kmehltretter82/rivemu
+          ref: ${{ steps.rivemu.outputs.ref }}
+          path: qemu_rust
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rivemu-lockstep
+      - working-directory: rivemu-lockstep
+        run: cargo +1.85.0 check --all-targets
+
+  differential:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: rivemu-lockstep
+      - name: Choose rivemu ref
+        id: rivemu
+        run: rivemu-lockstep/scripts/ci-rivemu-ref.sh "${{ inputs.rivemu_ref }}" "${{ github.head_ref || github.ref_name }}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v5
+        with:
+          repository: kmehltretter82/rivemu
+          ref: ${{ steps.rivemu.outputs.ref }}
+          path: qemu_rust
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rivemu-lockstep
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build meson flex bison python3-venv python3-tomli \
+            libglib2.0-dev libpixman-1-dev libslirp-dev libfdt-dev zlib1g-dev libgmp-dev z3
+      - uses: actions/cache@v4
+        with:
+          path: |
+            third_party/qemu-11.1.3
+            third_party/sail-0.20.3
+            third_party/sail-riscv-0.16-debug-v1
+          key: lockstep-tools-${{ runner.os }}-${{ hashFiles('rivemu-lockstep/scripts/setup-toolchain.sh', 'rivemu-lockstep/scripts/build-sail-debug-v1.sh', 'rivemu-lockstep/patches/*.patch') }}
+      - name: Build QEMU 11.1.3 and patched Sail 0.16 (cached)
+        run: SKIP_APT=1 rivemu-lockstep/scripts/setup-toolchain.sh "$GITHUB_WORKSPACE/third_party"
+      - run: echo "$GITHUB_WORKSPACE/third_party/qemu-11.1.3/bin" >> "$GITHUB_PATH"
+      - name: Tests with QEMU and Sail required, plus startup stress
+        working-directory: rivemu-lockstep
+        env:
+          RIVEMU_LOCKSTEP_REQUIRE_QEMU: 1
+          RIVEMU_LOCKSTEP_REQUIRE_SAIL: 1
+          RIVEMU_LOCKSTEP_STRESS: 1
+        run: cargo test --release -- --nocapture
+      - name: Per-suite differential runs against QEMU and Sail
+        working-directory: rivemu-lockstep
+        run: scripts/ci-differential.sh "$GITHUB_WORKSPACE/ci-logs"
+      - name: Multi-worker Sail startup check
+        working-directory: rivemu-lockstep
+        run: |
+          scripts/repeat-campaign.sh 5 "$GITHUB_WORKSPACE/ci-logs/sail-6-workers" -- \
+            campaign --reference sail --suite alu --workers 6 --blocks 300 --insns 16
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: differential-logs
+          path: ci-logs
