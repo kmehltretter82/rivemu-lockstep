@@ -114,6 +114,17 @@ pub fn run_firmware_lockstep(
     }
     let init_state = rivemu.get_state()?;
     qemu.set_state(&init_state)?;
+    // set_state clears CSRs outside ArchState (it is built for RISU blocks),
+    // and these reset values are implementation-specific anyway: for envcfg,
+    // rivemu enables the cache-block and A/D bits, QEMU sets ADUE and PBMTE,
+    // and Sail resets to 0; for stimecmp (reset value UNSPECIFIED in Sstc),
+    // rivemu resets to all-ones so no timer fires and QEMU resets to 0. Give
+    // QEMU rivemu's values so firmware and the kernel read the same.
+    let h = &rivemu.machine.harts[0];
+    let (menvcfg, senvcfg, stimecmp) = (h.csr.menvcfg, h.csr.senvcfg, h.csr.stimecmp);
+    qemu.write_csr(rivemu_cpu_riscv::csr::MENVCFG, menvcfg)?;
+    qemu.write_csr(rivemu_cpu_riscv::csr::SENVCFG, senvcfg)?;
+    qemu.write_csr(rivemu_cpu_riscv::csr::STIMECMP, stimecmp)?;
     let mut qemu_cached = qemu.get_state()?;
 
     let mut pre_state = init_state;
