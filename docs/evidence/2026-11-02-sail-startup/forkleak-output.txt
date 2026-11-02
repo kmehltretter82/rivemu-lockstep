@@ -1,0 +1,4 @@
+$ forkleak 0 20000
+spawner_threads=0 probes=20000 connected_to_dropped_listener=0 then_reset=0
+$ forkleak 4 20000
+spawner_threads=4 probes=20000 connected_to_dropped_listener=145 then_reset=142

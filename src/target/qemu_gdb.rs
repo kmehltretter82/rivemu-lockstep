@@ -1,9 +1,10 @@
 //! Real `qemu-system-riscv64` cosimulation target driven over the GDB Remote Serial Protocol.
 
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::path::Path;
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use rivemu_cpu_riscv::csr;
@@ -14,11 +15,15 @@ use crate::{ArchState, CosimTarget, StopReason, TargetError};
 const CSR_GDB_BASE: u32 = 66;
 /// GDB register index for `priv` (`riscv-64bit-virtual.xml`).
 const PRIV_GDB_REG: u32 = 65;
+/// Time allowed for QEMU to open its GDB socket on a loaded host.
+const QEMU_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Persistent `qemu-system-riscv64` process controlled via GDB RSP.
 pub struct QemuGdbTarget {
     child: Child,
-    stream: TcpStream,
+    stream: UnixStream,
+    /// Unix socket on which this QEMU serves its GDB stub.
+    socket_path: PathBuf,
     /// Whether to read/write privileged trap CSRs (`mstatus`, `mcause`, `mtval`, `mepc`, `satp`) on every state sync.
     pub sync_csrs: bool,
     pmp_enabled: bool,
@@ -57,8 +62,13 @@ impl QemuGdbTarget {
     /// Spawns `qemu-system-riscv64` with custom machine/boot arguments and connects to its GDB stub.
     pub fn spawn_with_args(qemu_bin: &Path, extra_args: &[&str]) -> Result<Self, TargetError> {
         let has_v = extra_args.iter().any(|arg| arg.contains("v=true"));
-        let port = pick_free_port()?;
-        let gdb_arg = format!("tcp:127.0.0.1:{port}");
+        // Serve the GDB stub on a Unix socket with a path unique to this
+        // process and spawn. Unlike a TCP port picked in advance, no other
+        // socket can be listening on it, so the connection below can only
+        // reach this QEMU.
+        let socket_path = unique_socket_path();
+        let _ = std::fs::remove_file(&socket_path);
+        let gdb_arg = format!("unix:{},server=on,wait=off", socket_path.display());
         let mut cmd = Command::new(qemu_bin);
         cmd.args(extra_args)
             .args([
@@ -76,14 +86,15 @@ impl QemuGdbTarget {
             .stderr(Stdio::null());
 
         let mut child = cmd.spawn()?;
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + QEMU_STARTUP_TIMEOUT;
         let stream = loop {
             if let Some(status) = child.try_wait()? {
+                let _ = std::fs::remove_file(&socket_path);
                 return Err(TargetError::Protocol(format!(
                     "qemu-system-riscv64 exited early with {status}"
                 )));
             }
-            match TcpStream::connect(("127.0.0.1", port)) {
+            match UnixStream::connect(&socket_path) {
                 Ok(s) => break s,
                 Err(_) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(15));
@@ -91,16 +102,20 @@ impl QemuGdbTarget {
                 Err(e) => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(TargetError::Io(e));
+                    let _ = std::fs::remove_file(&socket_path);
+                    return Err(TargetError::Protocol(format!(
+                        "qemu-system-riscv64 did not open its GDB socket {} within {}s: {e}",
+                        socket_path.display(),
+                        QEMU_STARTUP_TIMEOUT.as_secs()
+                    )));
                 }
             }
         };
-        stream.set_nodelay(true)?;
-        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
 
         let mut target = Self {
             child,
             stream,
+            socket_path,
             sync_csrs: true,
             pmp_enabled: false,
             no_ack_mode: false,
@@ -115,6 +130,9 @@ impl QemuGdbTarget {
                 CSR_GDB_BASE
             },
         };
+        target
+            .stream
+            .set_read_timeout(Some(Duration::from_secs(10)))?;
         let supported = target.cmd("qSupported:multiprocess+;xmlRegisters=i386")?;
         if supported
             .split(';')
@@ -404,12 +422,17 @@ impl Drop for QemuGdbTarget {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        // SIGKILL leaves QEMU no chance to remove its socket.
+        let _ = std::fs::remove_file(&self.socket_path);
     }
 }
 
-fn pick_free_port() -> Result<u16, TargetError> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    Ok(listener.local_addr()?.port())
+/// Returns a short, process- and spawn-unique socket path. macOS limits
+/// `sun_path` to 104 bytes, so the file name is kept short.
+fn unique_socket_path() -> PathBuf {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("rlq-{}-{sequence}.sock", std::process::id()))
 }
 
 fn encode_le_hex_u64(val: u64) -> String {
