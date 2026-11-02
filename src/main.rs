@@ -35,34 +35,6 @@ impl RisuReference {
     }
 }
 
-fn default_qemu() -> PathBuf {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let local = manifest.join("../qemu/build-d7314928-riscv64/qemu-system-riscv64");
-    if local.exists() {
-        return local;
-    }
-    let brew = Path::new("/opt/homebrew/bin/qemu-system-riscv64");
-    if brew.exists() {
-        brew.to_path_buf()
-    } else {
-        PathBuf::from("qemu-system-riscv64")
-    }
-}
-
-fn default_sail() -> PathBuf {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    for relative in [
-        "../third_party/sail-riscv-0.16-debug-v1/bin/sail_riscv_sim",
-        "../third_party/sail-riscv-0.16/bin/sail_riscv_sim",
-    ] {
-        let candidate = manifest.join(relative);
-        if candidate.exists() {
-            return candidate;
-        }
-    }
-    PathBuf::from("sail_riscv_sim")
-}
-
 fn print_usage() {
     eprintln!(
         "\
@@ -142,8 +114,8 @@ fn main() -> ExitCode {
     let mut step_check = false;
     let mut strict = false;
     let mut reference = RisuReference::Sail;
-    let mut sail_bin = default_sail();
-    let mut qemu_bin = default_qemu();
+    let mut sail_bin = rivemu_lockstep::tools::default_sail();
+    let mut qemu_bin = rivemu_lockstep::tools::default_qemu();
     let mut bios: Option<PathBuf> = None;
     let mut kernel: Option<PathBuf> = None;
     let mut steps = 1000usize;

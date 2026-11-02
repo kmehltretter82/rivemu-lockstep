@@ -214,10 +214,12 @@ mod tests {
 
     #[test]
     fn firmware_lockstep_crosses_mret_sv39_and_compressed_insns() {
-        let qemu_bin = Path::new("/opt/homebrew/bin/qemu-system-riscv64");
-        if !qemu_bin.exists() {
+        let Some(qemu_bin) =
+            crate::tools::qemu_for_test("firmware_lockstep_crosses_mret_sv39_and_compressed_insns")
+        else {
             return;
-        }
+        };
+        let qemu_bin = qemu_bin.as_path();
 
         // Build a flat firmware binary loaded at 0x8000_0000:
         // - M-mode installs a 1 GiB Sv39 root leaf PTE at 0x8000_1000 (mapping 0x8000_0000..0xbfff_ffff
@@ -295,16 +297,12 @@ mod tests {
 
     #[test]
     fn firmware_lockstep_handles_uart_clint_mmio_and_wfi() {
-        let local_qemu = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../qemu/build-d7314928-riscv64/qemu-system-riscv64");
-        let brew_qemu = Path::new("/opt/homebrew/bin/qemu-system-riscv64");
-        let qemu_bin = if local_qemu.exists() {
-            local_qemu.as_path()
-        } else if brew_qemu.exists() {
-            brew_qemu
-        } else {
+        let Some(qemu_bin) =
+            crate::tools::qemu_for_test("firmware_lockstep_handles_uart_clint_mmio_and_wfi")
+        else {
             return;
         };
+        let qemu_bin = qemu_bin.as_path();
 
         let mut image = vec![0u8; 0x2000];
         fn emit32(image: &mut [u8], offset: usize, word: u32) {

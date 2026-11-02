@@ -476,16 +476,12 @@ mod tests {
 
     #[test]
     fn zicfilp_and_pointer_masking_match_qemu_in_lockstep() {
-        let local_qemu =
-            "/Users/kmehltretter/codex/linux-work/qemu/build-d7314928-riscv64/qemu-system-riscv64";
-        let qemu_bin = if std::path::Path::new(local_qemu).exists() {
-            local_qemu
-        } else {
-            "qemu-system-riscv64"
-        };
-        let Ok(mut qemu) = QemuGdbTarget::spawn_bare_with_pmp(Path::new(qemu_bin), false) else {
+        let Some(qemu_bin) =
+            crate::tools::qemu_for_test("zicfilp_and_pointer_masking_match_qemu_in_lockstep")
+        else {
             return;
         };
+        let mut qemu = QemuGdbTarget::spawn_bare_with_pmp(&qemu_bin, false).expect("spawn QEMU");
         let mut rivemu = crate::target::RivemuTarget::new_bare(true).unwrap();
 
         let code_base = 0x8000_0000u64;
@@ -527,9 +523,11 @@ mod tests {
             trap_bytes.extend_from_slice(&word.to_le_bytes());
         }
 
-        let mut init = ArchState::default();
-        init.pc = code_base;
-        init.prv = 3;
+        let mut init = ArchState {
+            pc: code_base,
+            prv: 3,
+            ..ArchState::default()
+        };
         init.x[8] = 0x8001_0000;
         init.mepc = code_base + 0x14;
         // MPP = S (1 << 11), MPELP = 1 (1 << 41)
@@ -567,16 +565,12 @@ mod tests {
 
     #[test]
     fn zawrs_wrs_nto_and_wrs_sto_match_qemu_in_lockstep() {
-        let local_qemu =
-            "/Users/kmehltretter/codex/linux-work/qemu/build-d7314928-riscv64/qemu-system-riscv64";
-        let qemu_bin = if std::path::Path::new(local_qemu).exists() {
-            local_qemu
-        } else {
-            "qemu-system-riscv64"
-        };
-        let Ok(mut qemu) = QemuGdbTarget::spawn_bare_with_pmp(Path::new(qemu_bin), false) else {
+        let Some(qemu_bin) =
+            crate::tools::qemu_for_test("zawrs_wrs_nto_and_wrs_sto_match_qemu_in_lockstep")
+        else {
             return;
         };
+        let mut qemu = QemuGdbTarget::spawn_bare_with_pmp(&qemu_bin, false).expect("spawn QEMU");
         let mut rivemu = crate::target::RivemuTarget::new_bare(true).unwrap();
 
         let code_base = 0x8000_0000u64;
@@ -603,9 +597,11 @@ mod tests {
         }
 
         // Phase 1: S-mode with TW = 0: both wrs.nto and wrs.sto retire and clear LR reservation.
-        let mut init = ArchState::default();
-        init.pc = code_base;
-        init.prv = 1; // S-mode
+        let mut init = ArchState {
+            pc: code_base,
+            prv: 1, // S-mode
+            ..ArchState::default()
+        };
         init.x[8] = 0x8001_0000;
         init.x[12] = 0x77;
 
@@ -653,16 +649,12 @@ mod tests {
 
     #[test]
     fn smepmp_and_smstateen_match_qemu_in_lockstep() {
-        let local_qemu =
-            "/Users/kmehltretter/codex/linux-work/qemu/build-d7314928-riscv64/qemu-system-riscv64";
-        let qemu_bin = if std::path::Path::new(local_qemu).exists() {
-            local_qemu
-        } else {
-            "qemu-system-riscv64"
-        };
-        let Ok(mut qemu) = QemuGdbTarget::spawn_bare_with_pmp(Path::new(qemu_bin), true) else {
+        let Some(qemu_bin) =
+            crate::tools::qemu_for_test("smepmp_and_smstateen_match_qemu_in_lockstep")
+        else {
             return;
         };
+        let mut qemu = QemuGdbTarget::spawn_bare_with_pmp(&qemu_bin, true).expect("spawn QEMU");
         let mut rivemu = crate::target::RivemuTarget::new_bare(true).unwrap();
 
         let code_base = 0x8000_0000u64;
@@ -722,10 +714,12 @@ mod tests {
         }
         let trap_bytes = crate::risu::encode::build_trap_handler();
 
-        let mut init = ArchState::default();
-        init.pc = code_base;
-        init.prv = 3; // M-mode
-        init.mepc = scode_base;
+        let mut init = ArchState {
+            pc: code_base,
+            prv: 3, // M-mode
+            mepc: scode_base,
+            ..ArchState::default()
+        };
         init.mstatus |= 1 << 11; // MPP = S
         init.x[10] = data_base;
         init.x[12] = 0xfeed_face_cafe_beef;

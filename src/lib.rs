@@ -5,6 +5,7 @@
 pub mod lockstep;
 pub mod risu;
 pub mod target;
+pub mod tools;
 
 use std::fmt;
 use thiserror::Error;
