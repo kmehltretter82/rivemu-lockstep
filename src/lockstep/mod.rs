@@ -103,6 +103,7 @@ pub fn run_firmware_lockstep(
     }
     let init_state = rivemu.get_state()?;
     qemu.set_state(&init_state)?;
+    let mut qemu_cached = qemu.get_state()?;
 
     let mut pre_state = init_state;
     for step_index in 0..max_steps {
@@ -183,7 +184,30 @@ pub fn run_firmware_lockstep(
         }
 
         let rivemu_post = rivemu.get_state()?;
-        let qemu_post = qemu.get_state()?;
+        // Read only the QEMU state the instruction can have changed: FP
+        // state after FP instructions, privileged state after SYSTEM
+        // instructions or a trap/privilege change on rivemu. Re-read
+        // everything periodically and whenever anything differs, so a stale
+        // cache can neither hide nor invent a divergence.
+        let opcode = insn_word & 0x7f;
+        let is_system = insn_len == 4 && opcode == 0x73;
+        let is_fp = (insn_len == 4 && matches!(opcode, 0x07 | 0x43 | 0x47 | 0x4b | 0x4f | 0x53))
+            || (insn_len == 2 && matches!(insn_word & 0xe003, 0x2000 | 0x2002));
+        let trapped_or_switched = rivemu_post.prv != pre_state.prv
+            || rivemu_post.mcause != pre_state.mcause
+            || rivemu_post.scause != pre_state.scause
+            || rivemu_post.mepc != pre_state.mepc
+            || rivemu_post.sepc != pre_state.sepc;
+        let periodic = step_index % 1000 == 999;
+        let mut qemu_post = qemu.get_state_partial(
+            &qemu_cached,
+            is_fp || is_system || periodic,
+            is_system || trapped_or_switched || periodic,
+        )?;
+        if !rivemu_post.diff(&qemu_post, check_csrs).is_empty() {
+            qemu_post = qemu.get_state()?;
+        }
+        qemu_cached = qemu_post.clone();
         let diffs = rivemu_post.diff(&qemu_post, check_csrs);
         if !diffs.is_empty() {
             let decoded = format!("{decoded_insn:?}");

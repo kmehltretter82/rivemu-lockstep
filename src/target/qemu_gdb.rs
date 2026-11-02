@@ -1,6 +1,6 @@
 //! Real `qemu-system-riscv64` cosimulation target driven over the GDB Remote Serial Protocol.
 
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -21,7 +21,11 @@ const QEMU_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 /// Persistent `qemu-system-riscv64` process controlled via GDB RSP.
 pub struct QemuGdbTarget {
     child: Child,
+    /// Write half of the GDB connection.
     stream: UnixStream,
+    /// Buffered read half: replies are parsed byte by byte, and reading
+    /// them one `read` syscall per byte dominated the cost of a step.
+    reader: BufReader<UnixStream>,
     /// Unix socket on which this QEMU serves its GDB stub.
     socket_path: PathBuf,
     /// Whether to read/write privileged trap CSRs (`mstatus`, `mcause`, `mtval`, `mepc`, `satp`) on every state sync.
@@ -112,9 +116,11 @@ impl QemuGdbTarget {
             }
         };
 
+        let reader = BufReader::new(stream.try_clone()?);
         let mut target = Self {
             child,
             stream,
+            reader,
             socket_path,
             sync_csrs: true,
             pmp_enabled: false,
@@ -146,32 +152,55 @@ impl QemuGdbTarget {
 
     /// Sends a GDB RSP command payload (without `$` or `#xx`) and returns the decoded response body.
     pub fn cmd(&mut self, payload: &str) -> Result<String, TargetError> {
-        let sum: u8 = payload.bytes().fold(0u8, u8::wrapping_add);
-        let frame = format!("${payload}#{sum:02x}");
-        self.stream.write_all(frame.as_bytes())?;
+        self.stream.write_all(rsp_frame(payload).as_bytes())?;
+        self.recv_reply()
+    }
 
-        let mut buf = [0u8; 1];
-        // Read until `$`
-        loop {
-            self.stream.read_exact(&mut buf)?;
-            if buf[0] == b'$' {
-                break;
-            }
+    /// Sends several commands in one write and returns their replies in
+    /// order. QEMU's stub handles packets sequentially, so pipelining turns
+    /// one round trip per command into one round trip per batch. Without
+    /// no-ack mode the per-packet acknowledgements would interleave, so the
+    /// commands are then sent one at a time.
+    pub fn cmd_batch(&mut self, payloads: &[String]) -> Result<Vec<String>, TargetError> {
+        if !self.no_ack_mode {
+            return payloads.iter().map(|p| self.cmd(p)).collect();
+        }
+        let frames: String = payloads.iter().map(|p| rsp_frame(p)).collect();
+        self.stream.write_all(frames.as_bytes())?;
+        payloads.iter().map(|_| self.recv_reply()).collect()
+    }
+
+    /// Reads one `$...#xx` reply, acknowledging it unless no-ack mode is on.
+    fn recv_reply(&mut self) -> Result<String, TargetError> {
+        let mut skipped = Vec::new();
+        self.reader.read_until(b'$', &mut skipped)?;
+        if skipped.last() != Some(&b'$') {
+            return Err(TargetError::Protocol(
+                "GDB connection closed before a reply".into(),
+            ));
         }
         let mut body = Vec::with_capacity(64);
-        loop {
-            self.stream.read_exact(&mut buf)?;
-            if buf[0] == b'#' {
-                break;
-            }
-            body.push(buf[0]);
+        self.reader.read_until(b'#', &mut body)?;
+        if body.pop() != Some(b'#') {
+            return Err(TargetError::Protocol(
+                "GDB connection closed inside a reply".into(),
+            ));
         }
         let mut chk = [0u8; 2];
-        self.stream.read_exact(&mut chk)?;
+        self.reader.read_exact(&mut chk)?;
         if !self.no_ack_mode {
             self.stream.write_all(b"+")?;
         }
         String::from_utf8(body).map_err(|e| TargetError::Protocol(e.to_string()))
+    }
+
+    /// Reads several registers with one pipelined batch.
+    fn read_regs(&mut self, regnums: &[u32]) -> Result<Vec<u64>, TargetError> {
+        let payloads: Vec<String> = regnums.iter().map(|r| format!("p{r:x}")).collect();
+        self.cmd_batch(&payloads)?
+            .iter()
+            .map(|reply| decode_le_hex_u64(reply))
+            .collect()
     }
 
     /// Reads a single 64-bit GDB register by its GDB register number (`p <regnum>`).
@@ -200,6 +229,62 @@ impl QemuGdbTarget {
     /// Writes a RISC-V CSR by its architectural 12-bit CSR address.
     pub fn write_csr(&mut self, csr_addr: u16, val: u64) -> Result<(), TargetError> {
         self.write_reg(self.csr_gdb_base + u32::from(csr_addr), val)
+    }
+}
+
+impl QemuGdbTarget {
+    /// Reads the state needed after one step, reusing `cached` for groups
+    /// that the stepped instruction cannot have changed: FPRs/fcsr unless
+    /// `read_fp`, and the privileged CSRs unless `read_csrs`. GPRs and the PC
+    /// are always read. Each QEMU stub packet costs tens of microseconds, so
+    /// skipping the 45 reads that most steps do not need speeds up boot
+    /// lockstep several times.
+    pub fn get_state_partial(
+        &mut self,
+        cached: &ArchState,
+        read_fp: bool,
+        read_csrs: bool,
+    ) -> Result<ArchState, TargetError> {
+        if read_fp && read_csrs {
+            return self.get_state();
+        }
+        let saved = self.sync_csrs;
+        let mut state = if read_fp {
+            self.sync_csrs = false;
+            let result = self.get_state();
+            self.sync_csrs = saved;
+            result?
+        } else {
+            let g_resp = self.cmd("g")?;
+            if g_resp.len() < 33 * 16 {
+                return Err(TargetError::Protocol(format!(
+                    "short GDB 'g' reply ({} chars)",
+                    g_resp.len()
+                )));
+            }
+            let mut state = cached.clone();
+            for i in 0..32 {
+                state.x[i] = decode_le_hex_u64(&g_resp[i * 16..(i + 1) * 16])?;
+            }
+            state.pc = decode_le_hex_u64(&g_resp[32 * 16..33 * 16])?;
+            state
+        };
+        if !read_csrs || !self.sync_csrs {
+            // Keep the cached privileged state.
+            state.prv = cached.prv;
+            state.mstatus = cached.mstatus;
+            state.mepc = cached.mepc;
+            state.mcause = cached.mcause;
+            state.mtval = cached.mtval;
+            state.sstatus = cached.sstatus;
+            state.sepc = cached.sepc;
+            state.scause = cached.scause;
+            state.stval = cached.stval;
+            state.stvec = cached.stvec;
+            state.medeleg = cached.medeleg;
+            state.satp = cached.satp;
+        }
+        Ok(state)
     }
 }
 
@@ -324,25 +409,38 @@ impl CosimTarget for QemuGdbTarget {
         }
         let pc = decode_le_hex_u64(&g_resp[32 * 16..33 * 16])?;
 
-        let mut f = [0u64; 32];
-        for (i, value) in f.iter_mut().enumerate() {
-            *value = self.read_reg(33 + i as u32)?;
+        // FPRs, fcsr and (optionally) the privileged state in one batch.
+        let mut regnums: Vec<u32> = (33..65).collect();
+        regnums.push(self.csr_gdb_base + u32::from(csr::FCSR));
+        if self.sync_csrs {
+            regnums.push(self.priv_gdb_reg);
+            for csr_addr in [
+                csr::MSTATUS,
+                csr::MEPC,
+                csr::MCAUSE,
+                csr::MTVAL,
+                csr::SSTATUS,
+                csr::SEPC,
+                csr::SCAUSE,
+                csr::STVAL,
+                csr::STVEC,
+                csr::MEDELEG,
+            ] {
+                regnums.push(self.csr_gdb_base + u32::from(csr_addr));
+            }
         }
-        let fcsr = (self.read_csr(csr::FCSR)? & 0xff) as u32;
+        let values = self.read_regs(&regnums)?;
+        let mut f = [0u64; 32];
+        f.copy_from_slice(&values[..32]);
+        let fcsr = (values[32] & 0xff) as u32;
 
         let (prv, mstatus, mepc, mcause, mtval, sstatus, sepc, scause, stval, stvec, medeleg, satp) =
             if self.sync_csrs {
-                let prv = (self.read_reg(self.priv_gdb_reg)? & 3) as u8;
-                let mstatus = self.read_csr(csr::MSTATUS)?;
-                let mepc = self.read_csr(csr::MEPC)?;
-                let mcause = self.read_csr(csr::MCAUSE)?;
-                let mtval = self.read_csr(csr::MTVAL)?;
-                let sstatus = self.read_csr(csr::SSTATUS)?;
-                let sepc = self.read_csr(csr::SEPC)?;
-                let scause = self.read_csr(csr::SCAUSE)?;
-                let stval = self.read_csr(csr::STVAL)?;
-                let stvec = self.read_csr(csr::STVEC)?;
-                let medeleg = self.read_csr(csr::MEDELEG)?;
+                let v = &values[33..];
+                let prv = (v[0] & 3) as u8;
+                let (mstatus, mepc, mcause, mtval) = (v[1], v[2], v[3], v[4]);
+                let (sstatus, sepc, scause, stval) = (v[5], v[6], v[7], v[8]);
+                let (stvec, medeleg) = (v[9], v[10]);
                 let satp = if prv == 1 && mstatus & (1 << 20) != 0 {
                     // QEMU applies mstatus.TVM to debugger satp reads. Elevate
                     // only for this otherwise-unreadable sample; changing mode
@@ -425,6 +523,12 @@ impl Drop for QemuGdbTarget {
         // SIGKILL leaves QEMU no chance to remove its socket.
         let _ = std::fs::remove_file(&self.socket_path);
     }
+}
+
+/// Frames one RSP packet: `$payload#checksum`.
+fn rsp_frame(payload: &str) -> String {
+    let sum: u8 = payload.bytes().fold(0u8, u8::wrapping_add);
+    format!("${payload}#{sum:02x}")
 }
 
 /// Returns a short, process- and spawn-unique socket path. macOS limits
