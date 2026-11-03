@@ -189,13 +189,17 @@ pub fn run_firmware_lockstep(
             rivemu.machine.harts[0].x[rd] = q_val;
         }
 
-        // Synchronize hardware counter CSR reads (`time`, `cycle`, `instret`, `mcycle`, `minstret`)
-        // and entropy `seed` (`0x015`) RMW reads from QEMU to rivemu when the instruction retired without trapping.
+        // Synchronize hardware counter CSR reads (`time`, `cycle`, `instret`, `mcycle`, `minstret`),
+        // `tinfo` reads and entropy `seed` (`0x015`) RMW reads from QEMU to rivemu when the
+        // instruction retired without trapping. `tinfo` lists the implementation's trigger
+        // types and Sdtrig version: rivemu reports 0x0100_004c (version 1.0; mcontrol, icount,
+        // mcontrol6), QEMU 11.1.3 0x44 (version 0; mcontrol, mcontrol6), and QEMU has no
+        // property to change that. Firmware then uses only the types both implement.
         if insn_len == 4
             && rivemu.machine.harts[0].pc == pc.wrapping_add(u64::from(insn_len))
             && (matches!(
                 insn_word & 0xfff0_707f,
-                0xc000_2073 | 0xc010_2073 | 0xc020_2073 | 0xb000_2073 | 0xb020_2073
+                0xc000_2073 | 0xc010_2073 | 0xc020_2073 | 0xb000_2073 | 0xb020_2073 | 0x7a40_2073
             ) || (insn_word & 0xfff0_007f) == 0x0150_0073)
         {
             let rd = ((insn_word >> 7) & 0x1f) as usize;

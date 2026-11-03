@@ -1,0 +1,9 @@
+# rivemu 29434f138533e10a425f988e8bdf620f98bc7326 + mstateen/mcycle/CBO/mtime fixes (uncommitted); lockstep 78fc4b24faf6ea23dc62344e7463a5a72857b459 + tinfo read sync + num-triggers=4
+# QEMU 11.1.3; OpenSBI v1.7 fw_dynamic.bin sha256 4be292368f8c24371101f1b1048ede17284210545378994b193852d779d59bfe
+# Linux 6.12 Image (scripts/build-linux-test-from-source.sh) sha256 3994b77eacbef88b8e6989feba1fe532252ede8e0192784fbb3fb8e54a293668
+$ rivemu-lockstep boot --bios fw_dynamic.bin --kernel Image --steps 3000000 --check-csrs
+PASS: early boot CPU lockstep completed 3000000 instructions in 568.60s with 0 divergences.
+
+real	9m28.600s
+user	2m53.984s
+sys	8m14.822s

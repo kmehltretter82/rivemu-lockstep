@@ -1,0 +1,14 @@
+# rivemu 29434f138533e10a425f988e8bdf620f98bc7326 + mstateen/mcycle/CBO fixes (uncommitted); lockstep 78fc4b24faf6ea23dc62344e7463a5a72857b459
+# QEMU 11.1.3; OpenSBI v1.7 fw_dynamic.bin sha256 4be292368f8c24371101f1b1048ede17284210545378994b193852d779d59bfe
+# Linux 6.12 Image (scripts/build-linux-test-from-source.sh) sha256 3994b77eacbef88b8e6989feba1fe532252ede8e0192784fbb3fb8e54a293668
+$ rivemu-lockstep boot --bios fw_dynamic.bin --kernel Image --steps 3000000 --check-csrs
+=== LOCKSTEP DIVERGENCE [suite=all, seed=0x0000000000000000, step #1919953 @ pc=0x80003808] ===
+  Instruction : 0x7a4022f3 (32-bit)   decoded = Insn { op: Csrrs, rd: 5, rs1: 0, rs2: 4, rs3: 0, funct: 0, dbl: false, len: 4, imm: 1956, raw: 2051023603 }
+  Pre-fcsr    : 0x00 (frm=0, fflags=0x00)
+  Mismatched fields:
+  Candidate/reference: rivemu / QEMU
+    x5  (t0)         candidate = 0x000000000100004c   reference = 0x0000000000000044   (xor = 0x0000000001000008)
+
+real	3m16.712s
+user	1m13.605s
+sys	2m12.475s
