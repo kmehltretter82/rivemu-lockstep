@@ -115,7 +115,7 @@ to match rivemu, and implementation-defined values must be copied:
   `instret`, `mcycle`, `minstret`, `tinfo` and `seed` are copied from QEMU
   to rivemu.
 
-With OpenSBI v1.7 and Linux 6.12, `--steps 3000000 --check-csrs` runs with
+With OpenSBI v1.7 and Linux 6.12, `--steps 10000000 --check-csrs` runs with
 zero divergences (about 5,000 steps/s).
 `docs/evidence/2026-11-02-boot-lockstep/README.md` lists every divergence
 found on the way and its fix. Two of them were rivemu bugs.

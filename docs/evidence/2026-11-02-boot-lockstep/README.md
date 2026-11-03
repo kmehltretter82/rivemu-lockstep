@@ -28,5 +28,7 @@ divergence and continued until the next one.
 | `run8-tinfo-trigger-types.log` | 1,919,953 | `tinfo` read | Implementation-defined trigger types and Sdtrig version | lockstep: copy QEMU's `tinfo` read result |
 | `run9-tselect-trigger-count.log` | 1,920,046 | `tselect` read-back while probing | QEMU default 2 triggers, rivemu 4 | lockstep: QEMU `num-triggers=4` |
 | `run10-pass-3M-steps.log` | **3,000,000** | none | | |
+| `run11-marchid.log` (10M) | 6,678,554 | `marchid` read | Implementation-defined ID CSRs (QEMU's default `marchid` is 0x2a) | lockstep: QEMU `mvendorid=0,marchid=0,mimpid=0` |
+| `run12-pass-10M-steps.log` | **10,000,000** | none (rivemu `5b8765a`, with its fast TLB and decode-cache changes) | | |
 
-Run 10 took 568.6 s on a loaded 4-vCPU container (about 5,300 steps/s).
+Run 10 took 568.6 s on a loaded 4-vCPU container (about 5,300 steps/s); run 12, 10M steps, took 2,106.5 s.
