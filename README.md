@@ -134,9 +134,9 @@ same instructions in-process and checks each one
 (`src/lockstep/trace.rs`):
 
 - results and control flow must match for every instruction;
-- traps must go to the same target with the same privilege, `mstatus`
-  (compared bits), `mcause`/`mepc`/`mtval`, `scause`/`sepc`/`stval` and
-  `satp`;
+- traps must go to the same target with the same privilege (with V),
+  `mstatus` (compared bits), `mcause`/`mepc`/`mtval`, `scause`/`sepc`/
+  `stval`, `satp`, `hstatus`, `htval` and `mtval2`;
 - QEMU is the reference for device timing: when it takes an interrupt,
   rivemu takes the same one at the same instruction, and results that rivemu
   flags with `Hart::nondeterministic_read` (MMIO loads; counter, `time`,
@@ -168,6 +168,34 @@ the shell prompt with zero divergences: 358.6 M to 362.8 M instructions,
 bug (`sraiw` shifting by `imm & 15`) diverges after 18.2 M instructions with
 the exact register. Logs: `docs/evidence/2026-11-03-boot-trace/`. The CI job
 `boot-trace` runs the same boot.
+
+### H extension (`--hypervisor`)
+
+`--hypervisor` turns on H on both sides (QEMU `h=true`, rivemu
+`hypervisor`). `firmware/h_test.S` (`scripts/build-h-firmware.sh`) is a
+self-checking test of the H extension with 160 checks: CSRs, VS/VU-mode,
+virtual-instruction exceptions, delegation, two-stage translation and
+guest-page faults, HLV/HSV, VS-level interrupts and `sret` between modes.
+
+```sh
+scripts/build-h-firmware.sh
+target/release/rivemu-lockstep boot-trace --hypervisor \
+  --qemu ../third_party/qemu-11.1.3/bin/qemu-system-riscv64 \
+  --bios target/firmware/h_test.bin --until-console 'H-TEST PASS'
+```
+
+It passes on QEMU alone, on rivemu alone and in lockstep (43,107
+instructions, 61 exceptions, 4 interrupts mirrored, zero divergences), and
+OpenSBI + Linux with H on both sides reaches the shell prompt with zero
+divergences (364.9 M instructions). QEMU 11.1.3 differs from the privileged
+spec in ten places around H, among them that `mstatus.MPV` is not writable
+and how it sets `mstatus.GVA`. The default build avoids them and the
+lockstep does not compare `mstatus.GVA` (it reports how often QEMU's
+differed). Built with `-DSPEC`, the firmware adds 19 checks for those
+places; the Sail model 0.16 and rivemu pass all of them, QEMU fails 11.
+Details and logs: `docs/evidence/2026-11-03-h-extension/`. The CI job
+`boot-trace` runs the firmware on QEMU alone and on Sail, the spec build on
+rivemu, and both H lockstep runs.
 
 Limitations: rivemu runs through `Hart::step` (the reference interpreter
 path), not the block cache and inline fast paths that `run` uses; those are
