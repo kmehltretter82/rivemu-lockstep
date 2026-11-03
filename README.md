@@ -102,3 +102,20 @@ target/release/rivemu-lockstep boot \
 ```
 
 Start with a small step count because QEMU is controlled over its GDB remote protocol. Add `--check-csrs` for a short privileged-state comparison after the basic smoke test passes.
+
+Boot mode starts QEMU from rivemu's reset state, so QEMU must be configured
+to match rivemu, and implementation-defined values must be copied:
+
+- **Configuration:** the QEMU CPU model (`QEMU_CPU_PMP`) enables V
+  (VLEN 256), 16 PMP entries with Smepmp, Sscofpmf/Smcntrpmf with
+  hpmcounter3..31, and 4 triggers.
+- **Copied once:** before the first step, rivemu's `menvcfg`, `senvcfg` and
+  `stimecmp` reset values are written into QEMU.
+- **Copied after each read:** results of `csrr` from `cycle`, `time`,
+  `instret`, `mcycle`, `minstret`, `tinfo` and `seed` are copied from QEMU
+  to rivemu.
+
+With OpenSBI v1.7 and Linux 6.12, `--steps 3000000 --check-csrs` runs with
+zero divergences (about 5,000 steps/s).
+`docs/evidence/2026-11-02-boot-lockstep/README.md` lists every divergence
+found on the way and its fix. Two of them were rivemu bugs.
