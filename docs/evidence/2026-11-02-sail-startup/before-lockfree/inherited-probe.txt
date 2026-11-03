@@ -1,0 +1,23 @@
+# sailexp2 runs 1, 4, 12: the client connected ~0.35 ms after spawning Sail, to a port picked once (by itself) whose probe listener was already dropped.
+# Sail had not printed anything yet (empty log). Times are ms since process start.
+== run1 port=45941
+EXP pick port=45941 at_ms=4547.287 thread=ThreadId(6)
+EXP pick-dropped port=45941 at_ms=4547.300
+EXP spawn pid=8109 port=45941 log=Some("/tmp/claude-0/-home-user/79f4ee1e-e5af-54ff-957c-ab10ded0132a/scratchpad/sailexp2/run1/sail-port45941-203.log")
+EXP connect pid=8109 port=45941 local=Some(127.0.0.1:57484) peer=Some(127.0.0.1:45941) after=371.109µs at_ms=4547.706
+Sail output: []
+error at block 202 (suite=int-alu, seed=0x10ca): I/O error: Connection reset by peer (os error 104)
+== run4 port=40501
+EXP pick port=40501 at_ms=5386.822 thread=ThreadId(6)
+EXP pick-dropped port=40501 at_ms=5386.835
+EXP spawn pid=8991 port=40501 log=Some("/tmp/claude-0/-home-user/79f4ee1e-e5af-54ff-957c-ab10ded0132a/scratchpad/sailexp2/run4/sail-port40501-250.log")
+EXP connect pid=8991 port=40501 local=Some(127.0.0.1:33362) peer=Some(127.0.0.1:40501) after=325.211µs at_ms=5387.199
+Sail output: []
+error at block 248 (suite=int-alu, seed=0x10f8): I/O error: Connection reset by peer (os error 104)
+== run12 port=43993
+EXP pick port=43993 at_ms=3112.828 thread=ThreadId(5)
+EXP pick-dropped port=43993 at_ms=3112.842
+EXP spawn pid=11315 port=43993 log=Some("/tmp/claude-0/-home-user/79f4ee1e-e5af-54ff-957c-ab10ded0132a/scratchpad/sailexp2/run12/sail-port43993-145.log")
+EXP connect pid=11315 port=43993 local=Some(127.0.0.1:34316) peer=Some(127.0.0.1:43993) after=340.025µs at_ms=3113.215
+Sail output: []
+error at block 144 (suite=int-alu, seed=0x1090): I/O error: Connection reset by peer (os error 104)

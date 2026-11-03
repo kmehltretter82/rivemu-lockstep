@@ -1,0 +1,7 @@
+$ sail_riscv_sim (0.16, default configuration) h_test_sail.elf
+H-TEST start
+H-TEST PASS
+HTIF located at 0x80002240
+Entry point: 0x80000000
+SUCCESS
+exit status: 0

@@ -1,0 +1,13 @@
+# rivemu-lockstep risu --reference {sail,qemu --step-check} --suite S --blocks 128 --insns 32 --seed 0x9000, with fault-address tval comparison
+sail sv39: PASS: reference=sail suite=sv39-paging blocks=128 requested_insns_per_block=32 requested_insns_total=4096 start_seed=0x9000 step_check=true elapsed=134.89s
+sail sv48: PASS: reference=sail suite=sv48-paging blocks=128 requested_insns_per_block=32 requested_insns_total=4096 start_seed=0x9000 step_check=true elapsed=134.02s
+sail pmp: PASS: reference=sail suite=pmp blocks=128 requested_insns_per_block=32 requested_insns_total=4096 start_seed=0x9000 step_check=true elapsed=175.11s
+sail privileged: PASS: reference=sail suite=privileged-traps blocks=128 requested_insns_per_block=32 requested_insns_total=4096 start_seed=0x9000 step_check=true elapsed=110.50s
+sail cfi: PASS: reference=sail suite=cfi blocks=128 requested_insns_per_block=32 requested_insns_total=4096 start_seed=0x9000 step_check=true elapsed=113.47s
+sail mem: PASS: reference=sail suite=sandbox-mem-amo blocks=128 requested_insns_per_block=32 requested_insns_total=4096 start_seed=0x9000 step_check=true elapsed=41.54s
+qemu sv39: PASS: reference=qemu suite=sv39-paging blocks=128 requested_insns_per_block=32 requested_insns_total=4096 start_seed=0x9000 step_check=true elapsed=40.37s
+qemu sv48: PASS: reference=qemu suite=sv48-paging blocks=128 requested_insns_per_block=32 requested_insns_total=4096 start_seed=0x9000 step_check=true elapsed=42.13s
+qemu pmp: PASS: reference=qemu suite=pmp blocks=128 requested_insns_per_block=32 requested_insns_total=4096 start_seed=0x9000 step_check=true elapsed=55.62s
+qemu privileged: PASS: reference=qemu suite=privileged-traps blocks=128 requested_insns_per_block=32 requested_insns_total=4096 start_seed=0x9000 step_check=true elapsed=55.03s
+qemu cfi: PASS: reference=qemu suite=cfi blocks=128 requested_insns_per_block=32 requested_insns_total=4096 start_seed=0x9000 step_check=true elapsed=33.26s
+qemu mem: PASS: reference=qemu suite=sandbox-mem-amo blocks=128 requested_insns_per_block=32 requested_insns_total=4096 start_seed=0x9000 step_check=true elapsed=9.00s

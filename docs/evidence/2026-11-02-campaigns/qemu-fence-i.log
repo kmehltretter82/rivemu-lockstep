@@ -1,0 +1,22 @@
+START: campaign reference=qemu suite=fence-i-smc workers=2 max_blocks=512 insns_per_block=32 start_seed=0x20000
+PROGRESS: reference=qemu suite=fence-i-smc completed_blocks=25 insns_tested=800 latest_seed=0x20018 elapsed=1.38s
+PROGRESS: reference=qemu suite=fence-i-smc completed_blocks=50 insns_tested=1600 latest_seed=0x20031 elapsed=2.75s
+PROGRESS: reference=qemu suite=fence-i-smc completed_blocks=75 insns_tested=2400 latest_seed=0x2004a elapsed=4.19s
+PROGRESS: reference=qemu suite=fence-i-smc completed_blocks=100 insns_tested=3200 latest_seed=0x20063 elapsed=5.61s
+PROGRESS: reference=qemu suite=fence-i-smc completed_blocks=125 insns_tested=4000 latest_seed=0x2007c elapsed=7.03s
+PROGRESS: reference=qemu suite=fence-i-smc completed_blocks=150 insns_tested=4800 latest_seed=0x20095 elapsed=8.34s
+PROGRESS: reference=qemu suite=fence-i-smc completed_blocks=175 insns_tested=5600 latest_seed=0x200ae elapsed=9.71s
+PROGRESS: reference=qemu suite=fence-i-smc completed_blocks=200 insns_tested=6400 latest_seed=0x200c7 elapsed=11.09s
+PROGRESS: reference=qemu suite=fence-i-smc completed_blocks=225 insns_tested=7200 latest_seed=0x200e0 elapsed=12.45s
+PROGRESS: reference=qemu suite=fence-i-smc completed_blocks=250 insns_tested=8000 latest_seed=0x200f9 elapsed=13.78s
+PROGRESS: reference=qemu suite=fence-i-smc completed_blocks=275 insns_tested=8800 latest_seed=0x20112 elapsed=15.16s
+PROGRESS: reference=qemu suite=fence-i-smc completed_blocks=300 insns_tested=9600 latest_seed=0x2012b elapsed=16.59s
+PROGRESS: reference=qemu suite=fence-i-smc completed_blocks=325 insns_tested=10400 latest_seed=0x20144 elapsed=18.00s
+PROGRESS: reference=qemu suite=fence-i-smc completed_blocks=350 insns_tested=11200 latest_seed=0x2015d elapsed=19.44s
+PROGRESS: reference=qemu suite=fence-i-smc completed_blocks=375 insns_tested=12000 latest_seed=0x20176 elapsed=20.88s
+PROGRESS: reference=qemu suite=fence-i-smc completed_blocks=400 insns_tested=12800 latest_seed=0x2018f elapsed=22.22s
+PROGRESS: reference=qemu suite=fence-i-smc completed_blocks=425 insns_tested=13600 latest_seed=0x201a8 elapsed=23.67s
+PROGRESS: reference=qemu suite=fence-i-smc completed_blocks=450 insns_tested=14400 latest_seed=0x201c1 elapsed=25.03s
+PROGRESS: reference=qemu suite=fence-i-smc completed_blocks=475 insns_tested=15200 latest_seed=0x201db elapsed=25.97s
+PROGRESS: reference=qemu suite=fence-i-smc completed_blocks=500 insns_tested=16000 latest_seed=0x201f3 elapsed=26.80s
+PASS: campaign reference=qemu suite=fence-i-smc workers=2 blocks=512 requested_insns_per_block=32 requested_insns_total=16384 start_seed=0x20000 elapsed=27.22s

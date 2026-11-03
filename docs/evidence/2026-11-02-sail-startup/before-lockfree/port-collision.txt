@@ -1,0 +1,18 @@
+# sailexp/run3: two workers were given port 41481; the second Sail failed to bind and both clients connected to the first Sail.
+EXP spawn pid=5086 port=41481 log=Some("/tmp/claude-0/-home-user/79f4ee1e-e5af-54ff-957c-ab10ded0132a/scratchpad/sailexp/run3/sail-port41481-140.log")
+EXP spawn pid=5087 port=41481 log=Some("/tmp/claude-0/-home-user/79f4ee1e-e5af-54ff-957c-ab10ded0132a/scratchpad/sailexp/run3/sail-port41481-141.log")
+EXP connect pid=5086 port=41481 local=Some(127.0.0.1:57874) peer=Some(127.0.0.1:41481) after=30.737174ms
+EXP connect pid=5087 port=41481 local=Some(127.0.0.1:57882) peer=Some(127.0.0.1:41481) after=30.570703ms
+--- Sail output sail-port41481-140.log
+enabling unratified extensions.
+Unable to locate tohost symbol; disabling HTIF.
+Entry point: 0x80003000
+Error: bind: Address already in use
+--- Sail output sail-port41481-141.log
+enabling unratified extensions.
+Unable to locate tohost symbol; disabling HTIF.
+Entry point: 0x80003000
+Listening on port 41481 for debugger client ...
+read error: asio.misc:2 (End of file)
+closing connection.
+error at block 140 (suite=int-alu, seed=0x108c): I/O error: Connection reset by peer (os error 104)
