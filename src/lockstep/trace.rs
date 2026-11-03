@@ -53,6 +53,8 @@ pub struct TraceConfig {
     pub max_insns: u64,
     /// Stop once the guest console has printed this.
     pub until_console: Option<String>,
+    /// Enable the H extension on both sides.
+    pub hypervisor: bool,
 }
 
 /// Counts from a run.
@@ -72,6 +74,10 @@ pub struct TraceOutcome {
     /// leaves to the implementation (WARL `UXL`/`SXL`, and the `FS`/`VS`/`SD`
     /// dirty state), taken from QEMU.
     pub warl_status_reads: u64,
+    /// `mstatus` reads that differed in `GVA` (and possibly the fields of
+    /// `warl_status_reads`), taken from QEMU: QEMU 11.1 does not set GVA as
+    /// the spec does (see [`MSTATUS_COMPARE_MASK`]).
+    pub qemu_gva_reads: u64,
     /// Whether `until_console` appeared.
     pub reached_console: bool,
     /// The guest console as rivemu printed it (the last 4 KiB).
@@ -138,17 +144,46 @@ impl Trace {
     }
 }
 
-const fn priv_code(p: Priv) -> u64 {
-    match p {
+/// The privilege level as QEMU's `priv` register reports it: the mode in
+/// bits 1:0 and the virtualization mode V in bit 2.
+fn priv_code(h: &rivemu_cpu_riscv::Hart) -> u64 {
+    let p = match h.prv {
         Priv::User => 0,
         Priv::Supervisor => 1,
         Priv::Machine => 3,
+    };
+    p | (u64::from(h.virt) << 2)
+}
+
+/// QEMU's CPU options for the trace, with or without H.
+fn qemu_cpu(hypervisor: bool) -> String {
+    let cpu = crate::target::qemu_gdb::QEMU_CPU_PMP;
+    if hypervisor {
+        cpu.replace("h=false", "h=true")
+    } else {
+        cpu.to_string()
+    }
+}
+
+/// The interrupt code to raise in rivemu for an interrupt that QEMU took
+/// with cause `cause`, landing in privilege `prv` (QEMU's encoding). A
+/// VS-level interrupt taken in VS-mode reports the S-level code (VSSI 2 as
+/// SSI 1, and so on); rivemu's `trap` wants the VS-level code.
+fn interrupt_code(cause: u64, prv: u64) -> u64 {
+    let code = cause & !(1 << 63);
+    if prv == 5 && matches!(code, 1 | 5 | 9) {
+        code + 1
+    } else {
+        code
     }
 }
 
 /// `mstatus` fields whose read value the spec leaves to the implementation:
 /// `SD`, `SXL`, `UXL`, `FS` and `VS` (dirty tracking may be conservative).
 const STATUS_IMPL_DEFINED: u64 = (1 << 63) | (0xf << 32) | 0x6000 | 0x600;
+
+/// `mstatus.GVA`.
+const STATUS_GVA: u64 = 1 << 38;
 
 /// The CSR read by the instruction at `pc` (a SYSTEM instruction with a
 /// CSR funct3), if any.
@@ -181,13 +216,13 @@ fn compare_snapshot(
             regs[r - 1]
         )));
     }
-    if priv_code(h.prv) != prv
+    if priv_code(h) != prv
         || (h.csr.mstatus ^ mstatus) & MSTATUS_COMPARE_MASK != 0
         || h.csr.satp != satp
     {
         return Ok(Some(format!(
             "snapshot privilege/mstatus/satp: rivemu {}/{:#x}/{:#x}, QEMU {prv}/{mstatus:#x}/{satp:#x}",
-            priv_code(h.prv),
+            priv_code(h),
             h.csr.mstatus,
             h.csr.satp
         )));
@@ -235,7 +270,10 @@ fn spawn_qemu(cfg: &TraceConfig, rivemu: &mut RivemuTarget) -> Result<Qemu, Targ
     }
     let mut fdt = vec![0u8; fdt_size];
     rivemu.read_ram(fdt_addr, &mut fdt)?;
-    let tag = format!("rivemu-boot-trace-{}", std::process::id());
+    // Unique per run: tests run several traces in one process.
+    static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let run = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tag = format!("rivemu-boot-trace-{}-{run}", std::process::id());
     let dtb = std::env::temp_dir().join(format!("{tag}.dtb"));
     std::fs::write(&dtb, &fdt)?;
     let fifo = std::env::temp_dir().join(format!("{tag}.fifo"));
@@ -259,19 +297,14 @@ fn spawn_qemu(cfg: &TraceConfig, rivemu: &mut RivemuTarget) -> Result<Qemu, Targ
         h.csr.stimecmp
     );
     let mut cmd = Command::new(&cfg.qemu);
-    cmd.args([
-        "-machine",
-        "virt",
-        "-cpu",
-        crate::target::qemu_gdb::QEMU_CPU_PMP,
-    ])
-    .args(["-m", &format!("{}M", cfg.ram_mib), "-smp", "1"])
-    .arg("-bios")
-    .arg(&cfg.bios)
-    .arg("-dtb")
-    .arg(&dtb)
-    .args(["-display", "none", "-serial", "null", "-monitor", "none"])
-    .args(["-plugin", &plugin]);
+    cmd.args(["-machine", "virt", "-cpu", &qemu_cpu(cfg.hypervisor)])
+        .args(["-m", &format!("{}M", cfg.ram_mib), "-smp", "1"])
+        .arg("-bios")
+        .arg(&cfg.bios)
+        .arg("-dtb")
+        .arg(&dtb)
+        .args(["-display", "none", "-serial", "null", "-monitor", "none"])
+        .args(["-plugin", &plugin]);
     if let Some(k) = &cfg.kernel {
         cmd.arg("-kernel").arg(k);
     }
@@ -302,6 +335,7 @@ pub fn run_trace_lockstep(cfg: &TraceConfig) -> Result<TraceOutcome, TargetError
         initrd: cfg.initrd.clone(),
         append: cfg.append.clone(),
         icount: Some(0),
+        hypervisor: cfg.hypervisor,
         ..MachineConfig::default()
     })?;
     let qemu = spawn_qemu(cfg, &mut rivemu)?;
@@ -362,13 +396,17 @@ pub fn run_trace_lockstep(cfg: &TraceConfig) -> Result<TraceOutcome, TargetError
                         // QEMU keeps UXL writable (RV32 user mode); rivemu
                         // fixes it at 64 bits. Linux's compat_mode_detect
                         // writes UXL and reads it back. Both are legal.
-                        let status_read = history
+                        let read = history
                             .last()
-                            .and_then(|last| csr_read_at(&rivemu.machine, last))
-                            .is_some_and(|csr| matches!(csr, 0x100 | 0x300));
-                        if status_read && (ours ^ value) & !STATUS_IMPL_DEFINED == 0 {
+                            .and_then(|last| csr_read_at(&rivemu.machine, last));
+                        let status_read = matches!(read, Some(0x100 | 0x300));
+                        let diff = (ours ^ value) & !STATUS_IMPL_DEFINED;
+                        if status_read && diff == 0 {
                             rivemu.machine.harts[0].x[rd] = value;
                             out.warl_status_reads += 1;
+                        } else if read == Some(0x300) && diff == STATUS_GVA {
+                            rivemu.machine.harts[0].x[rd] = value;
+                            out.qemu_gva_reads += 1;
                         } else {
                             diverge!("x{rd}: rivemu {ours:#x}, QEMU {value:#x}");
                         }
@@ -462,14 +500,26 @@ pub fn run_trace_lockstep(cfg: &TraceConfig) -> Result<TraceOutcome, TargetError
             }
             b'C' => {
                 let h = &mut rivemu.machine.harts[0];
-                let [prv, mstatus, mcause, mepc, mtval, scause, sepc, stval, satp] =
-                    trace.u64s::<9>()?;
+                let [
+                    prv,
+                    mstatus,
+                    mcause,
+                    mepc,
+                    mtval,
+                    scause,
+                    sepc,
+                    stval,
+                    satp,
+                    hstatus,
+                    htval,
+                    mtval2,
+                ] = trace.u64s::<12>()?;
                 if let Some((_, to)) = pending_interrupt.take() {
                     let cause = if prv == 3 { mcause } else { scause };
                     if cause >> 63 == 0 {
                         diverge!("QEMU interrupt with cause {cause:#x}");
                     }
-                    h.trap(cause & !(1 << 63), true, 0);
+                    h.trap(interrupt_code(cause, prv), true, 0);
                     out.interrupts += 1;
                     if h.pc != to {
                         diverge!(
@@ -480,8 +530,11 @@ pub fn run_trace_lockstep(cfg: &TraceConfig) -> Result<TraceOutcome, TargetError
                     }
                 }
                 let c = &h.csr;
-                for (name, ours, theirs) in [
-                    ("privilege", priv_code(h.prv), prv),
+                let h_csr = |num| h.csr_read(num).unwrap_or(0);
+                // The first CSR that differs (`diverge!` must not run inside
+                // a `for`, where its `break` would only end the `for`).
+                let mismatch = [
+                    ("privilege", priv_code(h), prv),
                     (
                         "mstatus (compared bits)",
                         c.mstatus & MSTATUS_COMPARE_MASK,
@@ -494,10 +547,14 @@ pub fn run_trace_lockstep(cfg: &TraceConfig) -> Result<TraceOutcome, TargetError
                     ("sepc", c.sepc, sepc),
                     ("stval", c.stval, stval),
                     ("satp", c.satp, satp),
-                ] {
-                    if ours != theirs {
-                        diverge!("{name} after a trap: rivemu {ours:#x}, QEMU {theirs:#x}");
-                    }
+                    ("hstatus", h_csr(0x600), hstatus),
+                    ("htval", h_csr(0x643), htval),
+                    ("mtval2", h_csr(0x34b), mtval2),
+                ]
+                .into_iter()
+                .find(|&(_, ours, theirs)| ours != theirs);
+                if let Some((name, ours, theirs)) = mismatch {
+                    diverge!("{name} after a trap: rivemu {ours:#x}, QEMU {theirs:#x}");
                 }
             }
             b'S' => {
@@ -561,6 +618,7 @@ mod tests {
             ram_mib: 256,
             max_insns: 5_000_000,
             until_console: None,
+            hypervisor: false,
         };
         let missing: Vec<_> = [&cfg.plugin, &cfg.bios]
             .into_iter()
@@ -581,5 +639,83 @@ mod tests {
         assert_eq!(out.instructions, cfg.max_insns);
         assert!(out.snapshots > 70, "snapshots: {}", out.snapshots);
         assert!(out.exceptions > 0, "OpenSBI and Linux take traps early");
+    }
+
+    /// The H-extension test firmware (`firmware/h_test.S`, built by
+    /// `scripts/build-h-firmware.sh`) with H on both sides, to its own
+    /// verdict. Skipped like the test above.
+    #[test]
+    fn trace_lockstep_runs_the_h_extension_firmware_without_divergence() {
+        let Some(qemu) = crate::tools::qemu_for_test(
+            "trace_lockstep_runs_the_h_extension_firmware_without_divergence",
+        ) else {
+            return;
+        };
+        let cfg = TraceConfig {
+            qemu,
+            plugin: default_plugin(),
+            bios: Path::new(env!("CARGO_MANIFEST_DIR")).join("target/firmware/h_test.bin"),
+            kernel: None,
+            initrd: None,
+            append: None,
+            ram_mib: 256,
+            max_insns: u64::MAX,
+            until_console: Some("H-TEST PASS".into()),
+            hypervisor: true,
+        };
+        let missing: Vec<_> = [&cfg.plugin, &cfg.bios]
+            .into_iter()
+            .filter(|p| !p.is_file())
+            .collect();
+        if !missing.is_empty() {
+            assert!(
+                std::env::var_os("RIVEMU_LOCKSTEP_REQUIRE_TRACE").is_none(),
+                "missing {missing:?}"
+            );
+            eprintln!("skipping H firmware trace lockstep: missing {missing:?}");
+            return;
+        }
+        let out = run_trace_lockstep(&cfg).expect("trace lockstep runs");
+        assert_eq!(out.divergence, None);
+        assert!(out.reached_console, "console: {}", out.console_tail);
+        assert!(out.exceptions > 50, "exceptions: {}", out.exceptions);
+        assert!(out.interrupts >= 4, "interrupts: {}", out.interrupts);
+    }
+
+    /// The H firmware built with `-DSPEC` adds the checks where QEMU 11.1.3
+    /// differs from the privileged spec (the Sail model passes them, see
+    /// `docs/evidence/2026-11-03-h-extension/`), so it runs on rivemu alone.
+    #[test]
+    fn h_spec_firmware_passes_on_rivemu_alone() {
+        let bios = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/firmware/h_test_spec.bin");
+        if !bios.is_file() {
+            assert!(
+                std::env::var_os("RIVEMU_LOCKSTEP_REQUIRE_TRACE").is_none(),
+                "missing {}",
+                bios.display()
+            );
+            eprintln!("skipping: missing {}", bios.display());
+            return;
+        }
+        let mut rivemu = RivemuTarget::from_config(MachineConfig {
+            ram_size: 256 * MIB,
+            smp: 1,
+            bios: Some(bios),
+            hypervisor: true,
+            ..MachineConfig::default()
+        })
+        .expect("machine");
+        // The machine's own run loop (interrupts included), until the
+        // firmware powers off.
+        let m = &mut rivemu.machine;
+        let mut console = String::new();
+        for _ in 0..10_000 {
+            let event = m.run_slice();
+            console.push_str(&String::from_utf8_lossy(&m.uart.take_output()));
+            if event.is_some() {
+                break;
+            }
+        }
+        assert!(console.contains("H-TEST PASS"), "console:\n{console}");
     }
 }

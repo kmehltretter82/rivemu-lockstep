@@ -16,8 +16,9 @@
  *                                current value (rd 0 when there is none).
  *   'D' kind:u8 from:u64 to:u64  a trap (kind 1 interrupt, 2 exception,
  *                                4 host call) from pc `from` to `to`.
- *   'C' priv mstatus mcause mepc mtval scause sepc stval satp : u64 each,
- *                                sent before the first 'I' after a trap.
+ *   'C' priv mstatus mcause mepc mtval scause sepc stval satp
+ *       hstatus htval mtval2 : u64 each, sent before the first 'I' after a
+ *                                trap (the H CSRs read 0 without H).
  *   'S' x1..x31 priv mstatus satp : u64 each, the state before the
  *                                instruction of the preceding 'I' record;
  *                                every 2^16 instructions and at the entry.
@@ -48,9 +49,13 @@ static const char *gpr_names[32] = {
     "a1", "a2", "a3", "a4", "a5", "a6", "a7", "s2", "s3", "s4", "s5",
     "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6",
 };
-enum { PRIV, MSTATUS, MCAUSE, MEPC, MTVAL, SCAUSE, SEPC, STVAL, SATP, NCSR };
+enum {
+    PRIV, MSTATUS, MCAUSE, MEPC, MTVAL, SCAUSE, SEPC, STVAL, SATP,
+    HSTATUS, HTVAL, MTVAL2, NCSR
+};
 static const char *csr_names[NCSR] = {
     "priv", "mstatus", "mcause", "mepc", "mtval", "scause", "sepc", "stval", "satp",
+    "hstatus", "htval", "mtval2",
 };
 static struct qemu_plugin_register *csr[NCSR];
 
@@ -269,7 +274,8 @@ static void vcpu_init(unsigned int vcpu_index, void *userdata)
             exit(1);
         }
     }
-    for (int c = 0; c < NCSR; c++) {
+    /* The H CSRs exist only with h=true; read_reg() reads 0 without them. */
+    for (int c = 0; c < HSTATUS; c++) {
         if (!csr[c]) {
             fprintf(stderr, "rivemu_trace: register %s not found\n", csr_names[c]);
             exit(1);

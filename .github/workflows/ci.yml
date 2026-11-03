@@ -190,13 +190,33 @@ jobs:
       - name: Build the rivemu_trace QEMU plugin
         working-directory: rivemu-lockstep
         run: scripts/build-qemu-plugin.sh "$GITHUB_WORKSPACE/third_party/qemu-11.1.3/bin/qemu-system-riscv64"
+      - name: Build the H-extension test firmware
+        working-directory: rivemu-lockstep
+        run: scripts/build-h-firmware.sh
+      - name: H-extension firmware on QEMU alone (checks the test's expectations)
+        working-directory: rivemu-lockstep
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/ci-logs"
+          cpu=$(grep -o 'QEMU_CPU_PMP: &str = "[^"]*"' src/target/qemu_gdb.rs \
+            | sed 's/.*= "//; s/"$//; s/h=false/h=true/')
+          timeout 60 "$GITHUB_WORKSPACE/third_party/qemu-11.1.3/bin/qemu-system-riscv64" \
+            -M virt -cpu "$cpu" -m 256M -smp 1 -bios target/firmware/h_test.bin \
+            -display none -monitor none -serial "file:$GITHUB_WORKSPACE/ci-logs/h-test-qemu.log"
+          cat "$GITHUB_WORKSPACE/ci-logs/h-test-qemu.log"
+          grep -q '^H-TEST PASS' "$GITHUB_WORKSPACE/ci-logs/h-test-qemu.log"
+      - name: H-extension firmware with the spec-only checks on the Sail model
+        working-directory: rivemu-lockstep
+        run: |
+          timeout 600 "$GITHUB_WORKSPACE/third_party/sail-riscv-0.16-debug-v1/bin/sail_riscv_sim" \
+            target/firmware/h_test_sail.elf 2>&1 | tee "$GITHUB_WORKSPACE/ci-logs/h-test-sail.log"
+          grep -q '^H-TEST PASS' "$GITHUB_WORKSPACE/ci-logs/h-test-sail.log"
       - name: Trace lockstep test (required)
         working-directory: rivemu-lockstep
         env:
           RIVEMU_LOCKSTEP_QEMU: ${{ github.workspace }}/third_party/qemu-11.1.3/bin/qemu-system-riscv64
           RIVEMU_LOCKSTEP_REQUIRE_QEMU: 1
           RIVEMU_LOCKSTEP_REQUIRE_TRACE: 1
-        run: cargo test --release trace_lockstep -- --nocapture
+        run: cargo test --release -- trace_lockstep h_spec_firmware --nocapture
       - name: Boot lockstep to the shell prompt
         working-directory: rivemu-lockstep
         run: |
@@ -208,6 +228,20 @@ jobs:
             --initrd "$I/linux-src/rootfs.cpio" --append console=ttyS0 \
             --until-console '~ # ' 2>&1 | tee "$GITHUB_WORKSPACE/ci-logs/boot-trace.log"
           grep -q '^PASS: 0 divergences' "$GITHUB_WORKSPACE/ci-logs/boot-trace.log"
+      - name: H extension in lockstep (test firmware, then Linux with H)
+        working-directory: rivemu-lockstep
+        run: |
+          I="$GITHUB_WORKSPACE/qemu_rust/images"
+          Q="$GITHUB_WORKSPACE/third_party/qemu-11.1.3/bin/qemu-system-riscv64"
+          cargo run --release -- boot-trace --hypervisor --qemu "$Q" \
+            --bios target/firmware/h_test.bin --until-console 'H-TEST PASS' 2>&1 \
+            | tee "$GITHUB_WORKSPACE/ci-logs/boot-trace-h-firmware.log"
+          grep -q '^PASS: 0 divergences' "$GITHUB_WORKSPACE/ci-logs/boot-trace-h-firmware.log"
+          cargo run --release -- boot-trace --hypervisor --qemu "$Q" \
+            --bios "$I/linux-test/fw_dynamic.bin" --kernel "$I/linux-src/Image" \
+            --initrd "$I/linux-src/rootfs.cpio" --append console=ttyS0 \
+            --until-console '~ # ' 2>&1 | tee "$GITHUB_WORKSPACE/ci-logs/boot-trace-h-linux.log"
+          grep -q '^PASS: 0 divergences' "$GITHUB_WORKSPACE/ci-logs/boot-trace-h-linux.log"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

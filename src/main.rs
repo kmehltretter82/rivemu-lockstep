@@ -77,6 +77,7 @@ rivemu_trace plugin, see scripts/build-qemu-plugin.sh):
   --steps <N>                                    Instructions to compare [default: unlimited]
   --until-console <TEXT>                         Stop once the console printed TEXT
   --plugin <PATH>                                librivemu_trace.so [default: target/qemu-plugin/]
+  --hypervisor                                   Enable the H extension on both sides
   --qemu <PATH>                                  Path to qemu-system-riscv64"
     );
 }
@@ -138,6 +139,7 @@ fn main() -> ExitCode {
     let mut memory_mib = 256u64;
     let mut until_console: Option<String> = None;
     let mut plugin = default_plugin();
+    let mut hypervisor = false;
 
     macro_rules! value_or_exit {
         ($result:expr) => {
@@ -250,6 +252,7 @@ fn main() -> ExitCode {
             "--plugin" => {
                 plugin = PathBuf::from(value_or_exit!(option_value(&args, &mut i, "--plugin")));
             }
+            "--hypervisor" => hypervisor = true,
             "-h" | "--help" => {
                 print_usage();
                 return ExitCode::SUCCESS;
@@ -299,18 +302,20 @@ fn main() -> ExitCode {
                 u64::MAX
             },
             until_console,
+            hypervisor,
         };
         let t0 = Instant::now();
         return match run_trace_lockstep(&cfg) {
             Ok(out) => {
                 println!(
-                    "boot-trace: {} instructions compared in {:.1} s ({} interrupts mirrored, {} exceptions, {} device-dependent reads copied, {} WARL status reads, {} snapshots)",
+                    "boot-trace: {} instructions compared in {:.1} s ({} interrupts mirrored, {} exceptions, {} device-dependent reads copied, {} WARL status reads, {} mstatus.GVA reads from QEMU, {} snapshots)",
                     out.instructions,
                     t0.elapsed().as_secs_f64(),
                     out.interrupts,
                     out.exceptions,
                     out.copied_reads,
                     out.warl_status_reads,
+                    out.qemu_gva_reads,
                     out.snapshots
                 );
                 println!("--- console (last 4 KiB) ---\n{}\n---", out.console_tail);

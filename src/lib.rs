@@ -87,8 +87,15 @@ impl Default for ArchState {
 
 /// Mask of `mstatus` bits compared in lockstep (excludes `SD` bit 63 if FS state encoding differs,
 /// or compares architectural bits `SIE`, `MIE`, `SPIE`, `MPIE`, `SPP`, `MPP`, `MPRV`, `SUM`,
-/// `MXR`, `TVM`, `TW`, `TSR`, `SPELP`, `SDT`, `MPELP`, `MDT`).
-pub const MSTATUS_COMPARE_MASK: u64 = 0x0000_0600_01fe_19aa;
+/// `MXR`, `TVM`, `TW`, `TSR`, `SPELP`, `SDT`, `MPV`, `MPELP`, `MDT`).
+///
+/// `GVA` (bit 38) is not compared: on a trap into M-mode QEMU 11.1 sets it
+/// whenever V = 1 and the trap value is nonzero (also for the instruction
+/// bits of an illegal or virtual instruction), never for HLV/HSV or
+/// MPRV-with-MPV faults taken with V = 0, and never clears it, where the
+/// privileged spec sets it exactly when `mtval` holds a guest virtual
+/// address. rivemu follows the spec.
+pub const MSTATUS_COMPARE_MASK: u64 = 0x0000_0680_01fe_19aa;
 
 impl ArchState {
     /// Compares candidate and reference architectural states, returning all differences.
