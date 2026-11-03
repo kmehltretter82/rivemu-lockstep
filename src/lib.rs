@@ -163,14 +163,69 @@ impl ArchState {
                     });
                 }
             }
+            // For address-type exceptions, though, the trap value is the
+            // faulting virtual address (Sstvala, part of RVA23S64, which rivemu,
+            // QEMU and Sail all follow), so compare it whenever both sides
+            // report the same such cause.
+            for (name, cause, other_cause, rv, qv) in [
+                ("mtval", self.mcause, other.mcause, self.mtval, other.mtval),
+                ("stval", self.scause, other.scause, self.stval, other.stval),
+            ] {
+                if cause == other_cause && tval_is_fault_address(cause) && rv != qv {
+                    out.push(FieldDiff {
+                        name: name.into(),
+                        candidate: rv,
+                        reference: qv,
+                    });
+                }
+            }
         }
         out
     }
 }
 
+/// Exception causes whose `xtval` must hold the faulting virtual address:
+/// misaligned (0, 4, 6), access fault (1, 5, 7) and page fault (12, 13, 15).
+fn tval_is_fault_address(cause: u64) -> bool {
+    cause >> 63 == 0 && matches!(cause, 0 | 1 | 4 | 5 | 6 | 7 | 12 | 13 | 15)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trap_values_are_compared_only_for_fault_addresses() {
+        let mut candidate = ArchState::default();
+        let mut reference = candidate.clone();
+        // Illegal instruction: 0 and the instruction bits are both legal.
+        candidate.mcause = 2;
+        reference.mcause = 2;
+        candidate.mtval = 0x0000_0073;
+        assert!(candidate.diff(&reference, true).is_empty());
+        // Load page fault in S-mode: stval must be the faulting address.
+        candidate.scause = 13;
+        reference.scause = 13;
+        candidate.stval = 0x4000_1000;
+        reference.stval = 0x4000_1004;
+        let names: Vec<_> = candidate
+            .diff(&reference, true)
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert_eq!(names, ["stval"]);
+        // Different causes are reported as such, not as a tval mismatch.
+        reference.scause = 15;
+        let names: Vec<_> = candidate
+            .diff(&reference, true)
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert_eq!(names, ["scause"]);
+        // Not compared without privileged checks.
+        reference.scause = 13;
+        assert!(candidate.diff(&reference, false).is_empty());
+    }
 
     #[test]
     fn delegation_csrs_are_compared_only_with_privileged_checks() {
