@@ -6,6 +6,8 @@ use rivemu_core::size::MIB;
 use rivemu_cpu_riscv::decode::{self, Op};
 use rivemu_machine::{MachineConfig, virt::memmap};
 
+pub mod trace;
+
 use crate::risu::BisectReport;
 use crate::risu::Suite;
 use crate::target::{QemuGdbTarget, RivemuTarget};
@@ -45,6 +47,9 @@ pub fn run_firmware_lockstep(
         bios: Some(bios.to_path_buf()),
         kernel: kernel.map(Path::to_path_buf),
         icount: Some(0),
+        // Without PMP in QEMU, rivemu must not apply the spec rule that an
+        // S/U access matching no PMP entry fails (its default).
+        strict_pmp: pmp,
         ..MachineConfig::default()
     };
     let mut rivemu = RivemuTarget::from_config(cfg)?;
@@ -75,8 +80,8 @@ pub fn run_firmware_lockstep(
         // rivemu always implements 16 PMP entries (and Smepmp), and real
         // firmware such as OpenSBI probes and programs them, so QEMU needs
         // PMP too. Synthetic images that never program PMP use a PMP-less
-        // QEMU: with PMP present and no matching entry the spec denies S/U
-        // accesses, which rivemu only enforces in -strict mode.
+        // QEMU, and rivemu with `strict_pmp` off: with PMP present and no
+        // matching entry the spec denies S/U accesses.
         if pmp {
             crate::target::qemu_gdb::QEMU_CPU_PMP
         } else {

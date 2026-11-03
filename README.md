@@ -119,3 +119,59 @@ With OpenSBI v1.7 and Linux 6.12, `--steps 30000000 --check-csrs` runs with
 zero divergences (about 4,700 steps/s).
 `docs/evidence/2026-11-02-boot-lockstep/README.md` lists every divergence
 found on the way and its fix. Two of them were rivemu bugs.
+
+`boot` mode masks interrupts on both sides (QEMU's GDB single step does not
+deliver them, and rivemu does not tick its devices), so Linux eventually
+waits forever for a timer tick. `boot-trace` covers a whole boot instead.
+
+## Trace-driven boot lockstep to the shell prompt (`boot-trace`)
+
+`boot-trace` runs QEMU at full TCG speed with the `rivemu_trace` plugin
+(`qemu-plugin/rivemu_trace.c`), which streams the PC of every instruction,
+the previous instruction's destination register, every trap with the trap
+CSRs, and all integer registers every 2^16 instructions. rivemu steps the
+same instructions in-process and checks each one
+(`src/lockstep/trace.rs`):
+
+- results and control flow must match for every instruction;
+- traps must go to the same target with the same privilege, `mstatus`
+  (compared bits), `mcause`/`mepc`/`mtval`, `scause`/`sepc`/`stval` and
+  `satp`;
+- QEMU is the reference for device timing: when it takes an interrupt,
+  rivemu takes the same one at the same instruction, and results that rivemu
+  flags with `Hart::nondeterministic_read` (MMIO loads; counter, `time`,
+  `seed`, `tinfo`, `mip`/`sip` CSR reads) are taken from QEMU;
+- one implementation choice is accepted explicitly: QEMU keeps
+  `mstatus.UXL` writable (RV32 user mode), rivemu fixes it at 64 bits, so a
+  `sstatus`/`mstatus` read may differ only in `UXL`/`SXL` and the `FS`/`VS`/
+  `SD` dirty bits (Linux's `compat_mode_detect` does this once).
+
+QEMU gets rivemu's device tree with `-dtb` and the initrd through
+`-device loader` at rivemu's address, so both see identical memory, and the
+plugin writes rivemu's `menvcfg`, `senvcfg` and `stimecmp` reset values into
+QEMU at the firmware entry.
+
+```sh
+scripts/build-qemu-plugin.sh ../third_party/qemu-11.1.3/bin/qemu-system-riscv64
+target/release/rivemu-lockstep boot-trace \
+  --qemu ../third_party/qemu-11.1.3/bin/qemu-system-riscv64 \
+  --bios ../qemu_rust/images/linux-test/fw_dynamic.bin \
+  --kernel ../qemu_rust/images/linux-src/Image \
+  --initrd ../qemu_rust/images/linux-src/rootfs.cpio \
+  --append console=ttyS0 --until-console '~ # '
+```
+
+With OpenSBI v1.7, Linux 6.12 and the BusyBox initramfs
+(`../qemu_rust/scripts/build-linux-test-from-source.sh`), three runs reached
+the shell prompt with zero divergences: 358.6 M to 362.8 M instructions,
+12,129 to 13,077 interrupts mirrored, in 66 to 81 s each. An injected rivemu
+bug (`sraiw` shifting by `imm & 15`) diverges after 18.2 M instructions with
+the exact register. Logs: `docs/evidence/2026-11-03-boot-trace/`. The CI job
+`boot-trace` runs the same boot.
+
+Limitations: rivemu runs through `Hart::step` (the reference interpreter
+path), not the block cache and inline fast paths that `run` uses; those are
+covered by rivemu's block-versus-step equivalence tests, riscv-arch-test and
+the Linux end-to-end tests. Only hart 0 is traced (`-smp 1`), and
+floating-point registers are compared only through the integer results
+they feed into.

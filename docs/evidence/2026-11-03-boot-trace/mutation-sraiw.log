@@ -1,0 +1,3 @@
+# Mutation check: rivemu execute() Sraiw shift amount masked with 15 instead of 31 (injected, then reverted)
+boot-trace: 18201763 instructions compared in 3.5 s (0 interrupts mirrored, 18 exceptions, 3041 device-dependent reads copied, 0 WARL status reads, 278 snapshots)
+DIVERGENCE: after 18201763 instructions: x12: rivemu 0xfffffffffffffe7f, QEMU 0xffffffffffffffff (recent PCs: 0xffffffff80002596 0xffffffff80002598 0xffffffff8000259a 0xffffffff8000259e 0xffffffff800025a2 0xffffffff800025a4 0xffffffff800025a8 0xffffffff800025ac 0xffffffff800025e0 0xffffffff800025e4 0xffffffff800025e8 0xffffffff800025ec 0xffffffff800025f0 0xffffffff800025f4 0xffffffff800025f6 0xffffffff800025f8)

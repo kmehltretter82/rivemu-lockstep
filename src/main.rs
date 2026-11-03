@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use rivemu_lockstep::lockstep::run_firmware_lockstep;
+use rivemu_lockstep::lockstep::trace::{TraceConfig, default_plugin, run_trace_lockstep};
 use rivemu_lockstep::risu::{BisectReport, RisuCase, RisuHarness, Suite};
 use rivemu_lockstep::target::{QemuGdbTarget, RivemuTarget, SailGdbTarget};
 
@@ -42,6 +43,7 @@ Usage:
   rivemu-lockstep risu [OPTIONS]
   rivemu-lockstep campaign [OPTIONS]
   rivemu-lockstep boot --bios <PATH> [--kernel <PATH>] [OPTIONS]
+  rivemu-lockstep boot-trace --bios <PATH> [--kernel <PATH>] [--initrd <PATH>] [OPTIONS]
 
 RISU / Campaign Options:
   --reference <sail|qemu>                       Reference model [default: sail]
@@ -64,6 +66,17 @@ Early Boot CPU Smoke Options:
   --kernel <PATH>                                Optional kernel staged in guest memory
   --steps <N>                                    Early M-mode instructions to compare [default: 1000]
   --check-csrs                                   Compare privileged CSRs on every step
+  --qemu <PATH>                                  Path to qemu-system-riscv64
+
+Trace Boot Lockstep Options (boot-trace; QEMU runs freely with the
+rivemu_trace plugin, see scripts/build-qemu-plugin.sh):
+  --bios/--kernel <PATH>                         As for boot
+  --initrd <PATH>                                Initial ramdisk
+  --append <ARGS>                                Kernel command line
+  --memory <MiB>                                 Guest RAM [default: 256]
+  --steps <N>                                    Instructions to compare [default: unlimited]
+  --until-console <TEXT>                         Stop once the console printed TEXT
+  --plugin <PATH>                                librivemu_trace.so [default: target/qemu-plugin/]
   --qemu <PATH>                                  Path to qemu-system-riscv64"
     );
 }
@@ -119,6 +132,12 @@ fn main() -> ExitCode {
     let mut bios: Option<PathBuf> = None;
     let mut kernel: Option<PathBuf> = None;
     let mut steps = 1000usize;
+    let mut steps_explicit = false;
+    let mut initrd: Option<PathBuf> = None;
+    let mut append: Option<String> = None;
+    let mut memory_mib = 256u64;
+    let mut until_console: Option<String> = None;
+    let mut plugin = default_plugin();
 
     macro_rules! value_or_exit {
         ($result:expr) => {
@@ -132,7 +151,7 @@ fn main() -> ExitCode {
         };
     }
 
-    let mut i = if matches!(mode, "risu" | "campaign" | "boot") {
+    let mut i = if matches!(mode, "risu" | "campaign" | "boot" | "boot-trace") {
         1
     } else {
         0
@@ -210,6 +229,26 @@ fn main() -> ExitCode {
             }
             "--steps" => {
                 steps = value_or_exit!(parse_usize_option(&args, &mut i, "--steps"));
+                steps_explicit = true;
+            }
+            "--initrd" => {
+                initrd = Some(PathBuf::from(value_or_exit!(option_value(
+                    &args, &mut i, "--initrd"
+                ))));
+            }
+            "--append" => {
+                append = Some(value_or_exit!(option_value(&args, &mut i, "--append")).to_string());
+            }
+            "--memory" => {
+                memory_mib = value_or_exit!(parse_usize_option(&args, &mut i, "--memory")) as u64;
+            }
+            "--until-console" => {
+                until_console = Some(
+                    value_or_exit!(option_value(&args, &mut i, "--until-console")).to_string(),
+                );
+            }
+            "--plugin" => {
+                plugin = PathBuf::from(value_or_exit!(option_value(&args, &mut i, "--plugin")));
             }
             "-h" | "--help" => {
                 print_usage();
@@ -239,6 +278,58 @@ fn main() -> ExitCode {
     if steps == 0 {
         eprintln!("error: --steps must be greater than zero");
         return ExitCode::from(2);
+    }
+
+    if mode == "boot-trace" {
+        let Some(bios) = bios else {
+            eprintln!("error: `boot-trace` mode requires `--bios <PATH>`");
+            return ExitCode::from(2);
+        };
+        let cfg = TraceConfig {
+            qemu: qemu_bin,
+            plugin,
+            bios,
+            kernel,
+            initrd,
+            append,
+            ram_mib: memory_mib,
+            max_insns: if steps_explicit {
+                steps as u64
+            } else {
+                u64::MAX
+            },
+            until_console,
+        };
+        let t0 = Instant::now();
+        return match run_trace_lockstep(&cfg) {
+            Ok(out) => {
+                println!(
+                    "boot-trace: {} instructions compared in {:.1} s ({} interrupts mirrored, {} exceptions, {} device-dependent reads copied, {} WARL status reads, {} snapshots)",
+                    out.instructions,
+                    t0.elapsed().as_secs_f64(),
+                    out.interrupts,
+                    out.exceptions,
+                    out.copied_reads,
+                    out.warl_status_reads,
+                    out.snapshots
+                );
+                println!("--- console (last 4 KiB) ---\n{}\n---", out.console_tail);
+                if let Some(d) = out.divergence {
+                    println!("DIVERGENCE: {d}");
+                    ExitCode::from(1)
+                } else if cfg.until_console.is_some() && !out.reached_console {
+                    println!("FAIL: the console never printed {:?}", cfg.until_console);
+                    ExitCode::from(1)
+                } else {
+                    println!("PASS: 0 divergences");
+                    ExitCode::SUCCESS
+                }
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::from(2)
+            }
+        };
     }
 
     if mode == "boot" {
