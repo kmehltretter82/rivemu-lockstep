@@ -42,6 +42,25 @@ jobs:
           cargo clippy --all-targets
           cargo test
 
+  deny:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: rivemu-lockstep
+      - name: Choose rivemu ref
+        id: rivemu
+        run: rivemu-lockstep/scripts/ci-rivemu-ref.sh "${{ inputs.rivemu_ref }}" "${{ github.head_ref || github.ref_name }}" >> "$GITHUB_OUTPUT"
+      # cargo-deny resolves the full graph, including the ../qemu_rust path dependencies.
+      - uses: actions/checkout@v5
+        with:
+          repository: kmehltretter82/rivemu
+          ref: ${{ steps.rivemu.outputs.ref }}
+          path: qemu_rust
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: rivemu-lockstep/Cargo.toml
+
   msrv:
     runs-on: ubuntu-24.04
     steps:
