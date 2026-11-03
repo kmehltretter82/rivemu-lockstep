@@ -60,6 +60,12 @@ privileged spec (list below): `h_test_spec.bin` for rivemu and QEMU,
 | Trace lockstep, OpenSBI v1.7 + Linux 6.12 + BusyBox with H on both sides | `lockstep-linux-h-on.log` | 364,904,448 instructions to `~ # `, **0 divergences** |
 | The same with H off (regression) | `lockstep-linux-h-off.log` | 364,904,448 instructions to `~ # `, **0 divergences** |
 
+CI (rivemu-lockstep run 41608023525, job `boot-trace`, at `c366297` with
+rivemu `27ddcbf`): the firmware on QEMU alone and on Sail passed; the trace
+lockstep tests passed; firmware lockstep 32,111 instructions, 0
+divergences; Linux with H to `~ # ` 326,107,136 instructions, 0
+divergences; Linux with H off 325,058,560 instructions, 0 divergences.
+
 The trace lockstep compares every instruction's destination register and
 PC and, after every trap, the privilege level with V, `mstatus` (with
 `MPV`), `mcause`, `mepc`, `mtval`, `scause`, `sepc`, `stval`, `satp`,
