@@ -30,5 +30,6 @@ divergence and continued until the next one.
 | `run10-pass-3M-steps.log` | **3,000,000** | none | | |
 | `run11-marchid.log` (10M) | 6,678,554 | `marchid` read | Implementation-defined ID CSRs (QEMU's default `marchid` is 0x2a) | lockstep: QEMU `mvendorid=0,marchid=0,mimpid=0` |
 | `run12-pass-10M-steps.log` | **10,000,000** | none (rivemu `5b8765a`, with its fast TLB and decode-cache changes) | | |
+| `run13-pass-30M-steps.log` | **30,000,000** | none (rivemu `82f56c3`: also Zama16b, strict PMP and the inline fast path; lockstep `29e0e88`, which also compares fault `tval`s) | | |
 
-Run 10 took 568.6 s on a loaded 4-vCPU container (about 5,300 steps/s); run 12, 10M steps, took 2,106.5 s.
+Run 10 took 568.6 s on a loaded 4-vCPU container (about 5,300 steps/s); run 12, 10M steps, took 2,106.5 s; run 13, 30M steps, took 6,356.8 s.
