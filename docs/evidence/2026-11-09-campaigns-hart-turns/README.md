@@ -13,3 +13,11 @@ seed 0x1000) against QEMU 11.1.3 with `--step-check` and against the Sail
 model 0.16, with rivemu at `c5d2c64` (`64173c6` plus documentation; the
 path dependencies in `Cargo.toml` point at that checkout), run locally:
 **36/36 PASS**, `failed=0`, in 3 min 23 s (`summary.txt`, one log per run).
+
+CI run 42565376242 (workflow_dispatch, lockstep `815bab2`) checked out
+rivemu `c5d2c6412000d203f64281097d9acc5279f48f75` (msrv job log:
+`git log -1 --format=%H`) and passed all five jobs: `check`, `msrv`,
+`deny`, `differential` (QEMU and Sail required, every suite, the Sail
+startup check) and `boot-trace` (the trace lockstep test, the boot to the
+shell prompt in lockstep, then the H test firmware and Linux with H in
+lockstep, which ends `PASS: 0 divergences` after `~ # `).
