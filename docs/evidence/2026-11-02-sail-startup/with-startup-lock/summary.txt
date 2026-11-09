@@ -1,0 +1,9 @@
+run1 exit=0 wall=10.05s PASS: campaign reference=sail suite=int-alu workers=6 blocks=300 requested_insns_per_block=16 requested_insns_total=4800 start_seed=0x1000 elapsed=10.05s
+run2 exit=0 wall=9.90s PASS: campaign reference=sail suite=int-alu workers=6 blocks=300 requested_insns_per_block=16 requested_insns_total=4800 start_seed=0x1000 elapsed=9.90s
+run3 exit=0 wall=9.73s PASS: campaign reference=sail suite=int-alu workers=6 blocks=300 requested_insns_per_block=16 requested_insns_total=4800 start_seed=0x1000 elapsed=9.72s
+run4 exit=0 wall=9.75s PASS: campaign reference=sail suite=int-alu workers=6 blocks=300 requested_insns_per_block=16 requested_insns_total=4800 start_seed=0x1000 elapsed=9.74s
+run5 exit=0 wall=9.80s PASS: campaign reference=sail suite=int-alu workers=6 blocks=300 requested_insns_per_block=16 requested_insns_total=4800 start_seed=0x1000 elapsed=9.79s
+run6 exit=0 wall=9.81s PASS: campaign reference=sail suite=int-alu workers=6 blocks=300 requested_insns_per_block=16 requested_insns_total=4800 start_seed=0x1000 elapsed=9.81s
+run7 exit=0 wall=9.88s PASS: campaign reference=sail suite=int-alu workers=6 blocks=300 requested_insns_per_block=16 requested_insns_total=4800 start_seed=0x1000 elapsed=9.87s
+run8 exit=0 wall=10.49s PASS: campaign reference=sail suite=int-alu workers=6 blocks=300 requested_insns_per_block=16 requested_insns_total=4800 start_seed=0x1000 elapsed=10.48s
+runs=8 failed=0

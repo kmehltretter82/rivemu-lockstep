@@ -5,12 +5,14 @@
 //! bootstrap embedded in the ELF. Stock Sail uses binary `X` memory writes and
 //! has a `P`-packet endian quirk; an explicit dialect selects patched behavior.
 
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::collections::HashSet;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::risu::RisuCase;
@@ -44,12 +46,23 @@ const SENVCFG_GDB_REG: u32 = 82;
 const DEFAULT_MEMORY_CHUNK: usize = 1024;
 const MAX_MEMORY_CHUNK: usize = 2048;
 const SAIL_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
-// Overlapping Sail startups in multi-worker campaigns intermittently end in
-// "Connection reset by peer". The cause is not yet identified: choosing ports
-// outside the OS ephemeral range did not avoid it. Until it is, serialize each
-// startup from port selection to the first successful connection. This roughly
-// halves Sail campaign throughput.
-static SAIL_SPAWN_LOCK: Mutex<()> = Mutex::new(());
+/// Attempts to start Sail on a fresh port when the chosen port is taken.
+const SAIL_SPAWN_ATTEMPTS: usize = 16;
+/// Private TCP port range for Sail GDB servers.
+///
+/// It lies below the Linux (32768-60999) and macOS (49152-65535) ephemeral
+/// ranges, so no outgoing connection and no `bind(0)` socket on this host is
+/// assigned a port from it. Ports are never probed by binding a listener in
+/// this process: a probe listener that is dropped while another thread is in
+/// `Command::spawn` stays alive in the child's copy of the fd table until
+/// `execve`, keeps accepting connections, and resets them once the child
+/// execs. That was the cause of the intermittent "Connection reset by peer"
+/// in multi-worker Sail campaigns.
+const SAIL_PORT_RANGE: std::ops::Range<u16> = 20_000..30_000;
+/// Line Sail prints (and flushes) once its GDB acceptor is listening.
+const SAIL_LISTENING_PREFIX: &str = "Listening on port ";
+/// Ports handed to Sail processes that this process has not yet reaped.
+static SAIL_PORTS: Mutex<Option<SailPortAllocator>> = Mutex::new(None);
 /// Address of the bootstrap used to install `mtvec` in stock Sail.
 pub const SAIL_BOOTSTRAP_BASE: u64 = 0x8000_3000;
 static TEMP_ELF_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -115,6 +128,7 @@ impl Default for SailGdbDialect {
 /// A fresh Sail RISC-V process controlled through its GDB server.
 pub struct SailGdbTarget {
     child: Child,
+    port: u16,
     stream: TcpStream,
     bootstrap: SailBootstrap,
     dialect: SailGdbDialect,
@@ -235,51 +249,12 @@ impl SailGdbTarget {
             ));
         }
 
-        let spawn_guard = SAIL_SPAWN_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let port = pick_free_port()?;
-        let mut command = Command::new(sail_bin);
-        command
-            .arg("--enable-experimental-extensions")
-            .args(extra_args)
-            .arg("--gdb-server-port")
-            .arg(port.to_string())
-            .arg(elf_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-
-        let mut child = command.spawn()?;
-        let deadline = Instant::now() + SAIL_STARTUP_TIMEOUT;
-        let stream = loop {
-            if let Some(status) = child.try_wait()? {
-                return Err(TargetError::Protocol(format!(
-                    "Sail RISC-V exited before its GDB server was ready: {status}"
-                )));
-            }
-            match TcpStream::connect(("127.0.0.1", port)) {
-                Ok(stream) => break stream,
-                Err(_) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(15));
-                }
-                Err(error) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(TargetError::Protocol(format!(
-                        "Sail RISC-V did not open its GDB server on port {port} within {}s: {error}",
-                        SAIL_STARTUP_TIMEOUT.as_secs()
-                    )));
-                }
-            }
-        };
-        drop(spawn_guard);
-        stream.set_nodelay(true)?;
-        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(10)))?;
-
+        let (child, port, stream) = spawn_sail_and_connect(sail_bin, elf_path, extra_args)?;
+        // Construct the target first so that `Drop` kills Sail and releases the
+        // port if any later setup step fails.
         let mut target = Self {
             child,
+            port,
             stream,
             bootstrap,
             dialect,
@@ -288,6 +263,13 @@ impl SailGdbTarget {
             memory_chunk: DEFAULT_MEMORY_CHUNK,
             owned_elf: None,
         };
+        target.stream.set_nodelay(true)?;
+        target
+            .stream
+            .set_read_timeout(Some(Duration::from_secs(10)))?;
+        target
+            .stream
+            .set_write_timeout(Some(Duration::from_secs(10)))?;
         let response = target.cmd("qSupported:multiprocess+")?;
         if response.starts_with('E') {
             return Err(TargetError::Protocol(format!(
@@ -677,6 +659,7 @@ impl Drop for SailGdbTarget {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        release_sail_port(self.port);
         if let Some(path) = self.owned_elf.take() {
             let _ = std::fs::remove_file(path);
         }
@@ -765,9 +748,166 @@ fn memory_chunk_from_supported(response: &str) -> usize {
     })
 }
 
-fn pick_free_port() -> Result<u16, TargetError> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    Ok(listener.local_addr()?.port())
+/// Round-robin allocator over [`SAIL_PORT_RANGE`] that never hands out a port
+/// still owned by a live Sail process of this lockstep process.
+struct SailPortAllocator {
+    next: u16,
+    in_use: HashSet<u16>,
+}
+
+fn reserve_sail_port() -> Result<u16, TargetError> {
+    let mut guard = SAIL_PORTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let span = SAIL_PORT_RANGE.end - SAIL_PORT_RANGE.start;
+    let allocator = guard.get_or_insert_with(|| SailPortAllocator {
+        // Spread concurrent lockstep processes over the range.
+        next: (std::process::id() % u32::from(span)) as u16,
+        in_use: HashSet::new(),
+    });
+    for _ in 0..span {
+        let port = SAIL_PORT_RANGE.start + allocator.next;
+        allocator.next = (allocator.next + 1) % span;
+        if allocator.in_use.insert(port) {
+            return Ok(port);
+        }
+    }
+    Err(TargetError::Protocol(format!(
+        "all Sail GDB ports in {SAIL_PORT_RANGE:?} are in use"
+    )))
+}
+
+fn release_sail_port(port: u16) {
+    let mut guard = SAIL_PORTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(allocator) = guard.as_mut() {
+        allocator.in_use.remove(&port);
+    }
+}
+
+/// Outcome of waiting for one Sail process to open its GDB server.
+enum SailStartup {
+    Listening,
+    /// Sail exited before listening because the port was taken by another
+    /// process; retry on another port.
+    PortInUse(String),
+}
+
+/// Starts Sail on a reserved port and connects only after Sail reports that
+/// its own acceptor is listening, so the connection cannot reach any other
+/// listener. Retries on a new port when Sail cannot bind the reserved one.
+fn spawn_sail_and_connect(
+    sail_bin: &Path,
+    elf_path: &Path,
+    extra_args: &[&str],
+) -> Result<(Child, u16, TcpStream), TargetError> {
+    let deadline = Instant::now() + SAIL_STARTUP_TIMEOUT;
+    let mut last_conflict = String::new();
+    for _ in 0..SAIL_SPAWN_ATTEMPTS {
+        let port = reserve_sail_port()?;
+        let mut command = Command::new(sail_bin);
+        command
+            .arg("--enable-experimental-extensions")
+            .args(extra_args)
+            .arg("--gdb-server-port")
+            .arg(port.to_string())
+            .arg(elf_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                release_sail_port(port);
+                return Err(TargetError::Io(error));
+            }
+        };
+        match wait_for_sail_listening(&mut child, port, deadline) {
+            Ok(SailStartup::Listening) => match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(stream) => return Ok((child, port, stream)),
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    release_sail_port(port);
+                    return Err(TargetError::Protocol(format!(
+                        "Sail RISC-V reported its GDB server on port {port}, but connecting failed: {error}"
+                    )));
+                }
+            },
+            Ok(SailStartup::PortInUse(output)) => {
+                let _ = child.wait();
+                release_sail_port(port);
+                last_conflict = output;
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                release_sail_port(port);
+                return Err(error);
+            }
+        }
+    }
+    Err(TargetError::Protocol(format!(
+        "Sail RISC-V could not bind a GDB port after {SAIL_SPAWN_ATTEMPTS} attempts; last output: {last_conflict}"
+    )))
+}
+
+/// Forwards each line of `reader` to `tx`, then keeps draining until EOF so
+/// Sail never blocks on a full pipe after the receiver is gone.
+fn forward_lines(reader: impl Read + Send + 'static, tx: mpsc::Sender<String>) {
+    std::thread::spawn(move || {
+        for line in BufReader::new(reader).lines() {
+            let Ok(line) = line else { break };
+            let _ = tx.send(line);
+        }
+    });
+}
+
+/// Waits until `child` prints `Listening on port <port>`.
+fn wait_for_sail_listening(
+    child: &mut Child,
+    port: u16,
+    deadline: Instant,
+) -> Result<SailStartup, TargetError> {
+    let (tx, rx) = mpsc::channel();
+    if let Some(stdout) = child.stdout.take() {
+        forward_lines(stdout, tx.clone());
+    }
+    if let Some(stderr) = child.stderr.take() {
+        forward_lines(stderr, tx);
+    } else {
+        drop(tx);
+    }
+    let mut output = Vec::new();
+    let expected = format!("{SAIL_LISTENING_PREFIX}{port} ");
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(TargetError::Protocol(format!(
+                "Sail RISC-V did not open its GDB server on port {port} within {}s; output: {}",
+                SAIL_STARTUP_TIMEOUT.as_secs(),
+                output.join(" | ")
+            )));
+        }
+        match rx.recv_timeout(remaining.min(Duration::from_millis(100))) {
+            Ok(line) if line.starts_with(&expected) => return Ok(SailStartup::Listening),
+            Ok(line) => output.push(line),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                // Both pipes closed: Sail has exited (or is exiting).
+                let status = child.wait()?;
+                let text = output.join(" | ");
+                return if text.contains("Address already in use") {
+                    Ok(SailStartup::PortInUse(text))
+                } else {
+                    Err(TargetError::Protocol(format!(
+                        "Sail RISC-V exited before its GDB server was ready ({status}); output: {text}"
+                    )))
+                };
+            }
+        }
+    }
 }
 
 fn rsp_checksum(payload: &[u8]) -> u8 {

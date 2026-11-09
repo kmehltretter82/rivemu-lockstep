@@ -1,0 +1,7 @@
+Mutation 1: guest-page faults report the GPA unshifted in htval/mtval2 (mmu.rs guest_page_fault: tval2: gpa)
+boot-trace: 27997 instructions compared in 0.1 s (0 interrupts mirrored, 28 exceptions, 15 device-dependent reads copied, 0 WARL status reads, 22 mstatus.GVA reads from QEMU, 1 snapshots)
+DIVERGENCE: after 27997 instructions: mtval2 after a trap: rivemu 0x100030008, QEMU 0x4000c002 (recent PCs: 0x80001ac6 0x80001ac8 0x80001acc 0x80001ad0 0x80001ad4 0x80001ad8 0x80001adc 0x80001ae6 0x80001aea 0x80001aee 0x80001af2 0x80001c2e 0x80001c30 0x80001c32 0x80001c34 0x80001c36)
+
+Mutation 2: no VS interrupt code translation (hart.rs trap_full: VSSI stays 2 instead of 1)
+boot-trace: 29404 instructions compared in 0.1 s (1 interrupts mirrored, 52 exceptions, 15 device-dependent reads copied, 0 WARL status reads, 34 mstatus.GVA reads from QEMU, 1 snapshots)
+DIVERGENCE: after 29404 instructions: scause after a trap: rivemu 0x8000000000000002, QEMU 0x8000000000000001 (recent PCs: 0x80001ab4 0x80001ab8 0x80001abc 0x80001ac0 0x80001ac4 0x80001ac6 0x80001ac8 0x80001acc 0x80001ad0 0x80001ad4 0x80001ad8 0x80001adc 0x80001ae6 0x80001aea 0x80001aee 0x80001af2)

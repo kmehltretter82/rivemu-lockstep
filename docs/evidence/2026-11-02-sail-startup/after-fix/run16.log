@@ -1,0 +1,32 @@
+START: campaign reference=sail suite=int-alu workers=6 max_blocks=300 insns_per_block=16 start_seed=0x1000
+PROGRESS: reference=sail suite=int-alu completed_blocks=10 insns_tested=160 latest_seed=0x1009 elapsed=328.62ms
+PROGRESS: reference=sail suite=int-alu completed_blocks=20 insns_tested=320 latest_seed=0x1012 elapsed=540.61ms
+PROGRESS: reference=sail suite=int-alu completed_blocks=30 insns_tested=480 latest_seed=0x101d elapsed=751.61ms
+PROGRESS: reference=sail suite=int-alu completed_blocks=40 insns_tested=640 latest_seed=0x1027 elapsed=920.71ms
+PROGRESS: reference=sail suite=int-alu completed_blocks=50 insns_tested=800 latest_seed=0x1031 elapsed=1.12s
+PROGRESS: reference=sail suite=int-alu completed_blocks=60 insns_tested=960 latest_seed=0x103c elapsed=1.34s
+PROGRESS: reference=sail suite=int-alu completed_blocks=70 insns_tested=1120 latest_seed=0x1046 elapsed=1.54s
+PROGRESS: reference=sail suite=int-alu completed_blocks=80 insns_tested=1280 latest_seed=0x104f elapsed=1.73s
+PROGRESS: reference=sail suite=int-alu completed_blocks=90 insns_tested=1440 latest_seed=0x1059 elapsed=1.91s
+PROGRESS: reference=sail suite=int-alu completed_blocks=100 insns_tested=1600 latest_seed=0x1064 elapsed=2.14s
+PROGRESS: reference=sail suite=int-alu completed_blocks=110 insns_tested=1760 latest_seed=0x106d elapsed=2.36s
+PROGRESS: reference=sail suite=int-alu completed_blocks=120 insns_tested=1920 latest_seed=0x1079 elapsed=2.59s
+PROGRESS: reference=sail suite=int-alu completed_blocks=130 insns_tested=2080 latest_seed=0x1081 elapsed=2.75s
+PROGRESS: reference=sail suite=int-alu completed_blocks=140 insns_tested=2240 latest_seed=0x108b elapsed=3.02s
+PROGRESS: reference=sail suite=int-alu completed_blocks=150 insns_tested=2400 latest_seed=0x1097 elapsed=3.24s
+PROGRESS: reference=sail suite=int-alu completed_blocks=160 insns_tested=2560 latest_seed=0x109f elapsed=3.43s
+PROGRESS: reference=sail suite=int-alu completed_blocks=170 insns_tested=2720 latest_seed=0x10a8 elapsed=3.66s
+PROGRESS: reference=sail suite=int-alu completed_blocks=180 insns_tested=2880 latest_seed=0x10b3 elapsed=3.88s
+PROGRESS: reference=sail suite=int-alu completed_blocks=190 insns_tested=3040 latest_seed=0x10bd elapsed=4.07s
+PROGRESS: reference=sail suite=int-alu completed_blocks=200 insns_tested=3200 latest_seed=0x10c7 elapsed=4.28s
+PROGRESS: reference=sail suite=int-alu completed_blocks=210 insns_tested=3360 latest_seed=0x10d0 elapsed=4.46s
+PROGRESS: reference=sail suite=int-alu completed_blocks=220 insns_tested=3520 latest_seed=0x10da elapsed=4.66s
+PROGRESS: reference=sail suite=int-alu completed_blocks=230 insns_tested=3680 latest_seed=0x10e5 elapsed=4.86s
+PROGRESS: reference=sail suite=int-alu completed_blocks=240 insns_tested=3840 latest_seed=0x10ef elapsed=5.05s
+PROGRESS: reference=sail suite=int-alu completed_blocks=250 insns_tested=4000 latest_seed=0x10f8 elapsed=5.25s
+PROGRESS: reference=sail suite=int-alu completed_blocks=260 insns_tested=4160 latest_seed=0x1103 elapsed=5.47s
+PROGRESS: reference=sail suite=int-alu completed_blocks=270 insns_tested=4320 latest_seed=0x110d elapsed=5.65s
+PROGRESS: reference=sail suite=int-alu completed_blocks=280 insns_tested=4480 latest_seed=0x1117 elapsed=5.86s
+PROGRESS: reference=sail suite=int-alu completed_blocks=290 insns_tested=4640 latest_seed=0x1121 elapsed=6.06s
+PROGRESS: reference=sail suite=int-alu completed_blocks=300 insns_tested=4800 latest_seed=0x112b elapsed=6.31s
+PASS: campaign reference=sail suite=int-alu workers=6 blocks=300 requested_insns_per_block=16 requested_insns_total=4800 start_seed=0x1000 elapsed=6.31s

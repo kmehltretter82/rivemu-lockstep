@@ -1,0 +1,22 @@
+START: campaign reference=qemu suite=csr-trap workers=2 max_blocks=512 insns_per_block=32 start_seed=0x20000
+PROGRESS: reference=qemu suite=csr-trap completed_blocks=25 insns_tested=800 latest_seed=0x20018 elapsed=1.69s
+PROGRESS: reference=qemu suite=csr-trap completed_blocks=50 insns_tested=1600 latest_seed=0x20030 elapsed=3.22s
+PROGRESS: reference=qemu suite=csr-trap completed_blocks=75 insns_tested=2400 latest_seed=0x2004b elapsed=5.04s
+PROGRESS: reference=qemu suite=csr-trap completed_blocks=100 insns_tested=3200 latest_seed=0x20062 elapsed=6.80s
+PROGRESS: reference=qemu suite=csr-trap completed_blocks=125 insns_tested=4000 latest_seed=0x2007c elapsed=8.56s
+PROGRESS: reference=qemu suite=csr-trap completed_blocks=150 insns_tested=4800 latest_seed=0x20095 elapsed=10.22s
+PROGRESS: reference=qemu suite=csr-trap completed_blocks=175 insns_tested=5600 latest_seed=0x200ae elapsed=12.10s
+PROGRESS: reference=qemu suite=csr-trap completed_blocks=200 insns_tested=6400 latest_seed=0x200c7 elapsed=13.77s
+PROGRESS: reference=qemu suite=csr-trap completed_blocks=225 insns_tested=7200 latest_seed=0x200df elapsed=15.45s
+PROGRESS: reference=qemu suite=csr-trap completed_blocks=250 insns_tested=8000 latest_seed=0x200f9 elapsed=17.16s
+PROGRESS: reference=qemu suite=csr-trap completed_blocks=275 insns_tested=8800 latest_seed=0x20113 elapsed=19.07s
+PROGRESS: reference=qemu suite=csr-trap completed_blocks=300 insns_tested=9600 latest_seed=0x2012b elapsed=20.84s
+PROGRESS: reference=qemu suite=csr-trap completed_blocks=325 insns_tested=10400 latest_seed=0x20144 elapsed=22.57s
+PROGRESS: reference=qemu suite=csr-trap completed_blocks=350 insns_tested=11200 latest_seed=0x2015d elapsed=24.53s
+PROGRESS: reference=qemu suite=csr-trap completed_blocks=375 insns_tested=12000 latest_seed=0x20176 elapsed=26.26s
+PROGRESS: reference=qemu suite=csr-trap completed_blocks=400 insns_tested=12800 latest_seed=0x20190 elapsed=28.23s
+PROGRESS: reference=qemu suite=csr-trap completed_blocks=425 insns_tested=13600 latest_seed=0x201a7 elapsed=29.90s
+PROGRESS: reference=qemu suite=csr-trap completed_blocks=450 insns_tested=14400 latest_seed=0x201c1 elapsed=31.59s
+PROGRESS: reference=qemu suite=csr-trap completed_blocks=475 insns_tested=15200 latest_seed=0x201da elapsed=33.09s
+PROGRESS: reference=qemu suite=csr-trap completed_blocks=500 insns_tested=16000 latest_seed=0x201f4 elapsed=34.85s
+PASS: campaign reference=qemu suite=csr-trap workers=2 blocks=512 requested_insns_per_block=32 requested_insns_total=16384 start_seed=0x20000 elapsed=35.60s

@@ -1,0 +1,4 @@
+$ rivemu-system-riscv64 -M virt -cpu rv64,h=on -m 256M -bios h_test.bin -nographic
+H-TEST start
+H-TEST PASS
+exit status: 0

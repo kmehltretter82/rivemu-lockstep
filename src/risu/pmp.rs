@@ -106,12 +106,7 @@ pub fn configure_case(seed: u64, state: &mut ArchState) {
             (SCRATCH_BASE + 32) >> 2,
             0,
             CATCH_ALL_PMPADDR,
-            pack_pmpcfg0(
-                PMP_NA4,
-                PMP_NA4 | PMP_R | PMP_W,
-                0,
-                CATCH_ALL_PMPCFG,
-            ),
+            pack_pmpcfg0(PMP_NA4, PMP_NA4 | PMP_R | PMP_W, 0, CATCH_ALL_PMPCFG),
         ),
         Case::TorAndBoundaryStraddle => (
             (SCRATCH_BASE + 64) >> 2,
@@ -186,8 +181,8 @@ pub fn generate_block(rng: &mut Rng, seed: u64, num_insns: usize) -> Vec<u32> {
     out.push(i_type(0x73, 0, 0b001, 21, CSR_PMPADDR1)); // csrw pmpaddr1, x21
     out.push(i_type(0x73, 0, 0b001, 22, CSR_PMPADDR2)); // csrw pmpaddr2, x22
     out.push(i_type(0x73, 0, 0b001, 23, CSR_PMPADDR3)); // csrw pmpaddr3, x23
-    out.push(i_type(0x73, 0, 0b001, 24, CSR_PMPCFG0));  // csrw pmpcfg0, x24
-    out.push(i_type(0x73, 0, 0b001, 25, CSR_MENVCFG));  // csrw menvcfg, x25
+    out.push(i_type(0x73, 0, 0b001, 24, CSR_PMPCFG0)); // csrw pmpcfg0, x24
+    out.push(i_type(0x73, 0, 0b001, 25, CSR_MENVCFG)); // csrw menvcfg, x25
     out.push(SFENCE_VMA_ALL);
     if case == Case::MprvSupervisorVsMachine {
         out.push(i_type(0x73, 0, 0b001, 26, CSR_MSECCFG)); // csrw mseccfg, x26 (enable Smmpm in M-mode)
@@ -222,9 +217,9 @@ pub fn generate_block(rng: &mut Rng, seed: u64, num_insns: usize) -> Vec<u32> {
                 _ => s_type(0x23, 0b011, 8, rs2, 128), // 8B sd above TOR [128..136) -> ok
             },
             Case::LowestEntryPrecedence => match slot % 6 {
-                0 => i_type(0x03, rd, 0b011, 8, 0),   // pmp0 (no-access): ld -> mcause=5
-                1 => s_type(0x23, 0b011, 8, rs2, 8),  // pmp0 (no-access): sd -> mcause=7
-                2 => i_type(0x03, rd, 0b011, 8, 64),  // pmp1 (RO): ld -> ok
+                0 => i_type(0x03, rd, 0b011, 8, 0), // pmp0 (no-access): ld -> mcause=5
+                1 => s_type(0x23, 0b011, 8, rs2, 8), // pmp0 (no-access): sd -> mcause=7
+                2 => i_type(0x03, rd, 0b011, 8, 64), // pmp1 (RO): ld -> ok
                 3 => s_type(0x23, 0b011, 8, rs2, 72), // pmp1 (RO): sd -> mcause=7
                 4 => s_type(0x23, 0b011, 8, rs2, 256), // pmp2 (RW): sd -> ok
                 _ => i_type(0x03, rd, 0b011, 8, 256), // pmp2 (RW): ld -> ok
@@ -238,11 +233,11 @@ pub fn generate_block(rng: &mut Rng, seed: u64, num_insns: usize) -> Vec<u32> {
                 }
             }
             Case::ZicboPmpPermissions => match slot % 7 {
-                0 => i_type(0x0f, 0, 0b010, 8, 4),  // cbo.zero 0(s0) on no-access pmp0 -> mcause=7
-                1 => i_type(0x0f, 0, 0b010, 8, 1),  // cbo.clean 0(s0) on no-access pmp0 -> mcause=7
-                2 => i_type(0x0f, 0, 0b010, 9, 1),  // cbo.clean 0(s1) on RO pmp1 -> ok
-                3 => i_type(0x0f, 0, 0b010, 9, 2),  // cbo.flush 0(s1) on RO pmp1 -> ok
-                4 => i_type(0x0f, 0, 0b010, 9, 4),  // cbo.zero 0(s1) on RO pmp1 -> mcause=7
+                0 => i_type(0x0f, 0, 0b010, 8, 4), // cbo.zero 0(s0) on no-access pmp0 -> mcause=7
+                1 => i_type(0x0f, 0, 0b010, 8, 1), // cbo.clean 0(s0) on no-access pmp0 -> mcause=7
+                2 => i_type(0x0f, 0, 0b010, 9, 1), // cbo.clean 0(s1) on RO pmp1 -> ok
+                3 => i_type(0x0f, 0, 0b010, 9, 2), // cbo.flush 0(s1) on RO pmp1 -> ok
+                4 => i_type(0x0f, 0, 0b010, 9, 4), // cbo.zero 0(s1) on RO pmp1 -> mcause=7
                 5 => i_type(0x0f, 0, 0b010, 10, 4), // cbo.zero 0(s2) on RW pmp2 -> ok
                 _ => i_type(0x03, rd, 0b011, 10, 0), // ld from zeroed RW pmp2 -> 0
             },
@@ -298,4 +293,3 @@ mod tests {
         }
     }
 }
-

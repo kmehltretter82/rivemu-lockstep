@@ -6,10 +6,17 @@
 
 - Rust 1.85 or newer.
 - A sibling `../qemu_rust` rivemu checkout. The current `Cargo.toml` uses path dependencies from that directory.
-- Sail RISC-V 0.16 (`sail_riscv_sim`). The official macOS ARM64 release works without modification for normal register and memory comparison.
-- Optional: `qemu-system-riscv64` with TCG and the GDB stub. QEMU master is preferred for manually replaying the same seed as an independent third implementation and is required by `boot` mode.
+- Sail RISC-V 0.16 (`sail_riscv_sim`). The official macOS ARM64 release works without modification for normal register and memory comparison; privileged suites need the [debug-v1 patch](docs/sail-riscv-debug-v1.md).
+- `qemu-system-riscv64` with TCG and the GDB stub. The QEMU CPU model enables recent extensions (for example `ssdbltrp`, `smmpm`, `x-svukte`), so QEMU 11 or newer is required; Ubuntu 24.04's `qemu-system-misc` (8.2) cannot run the suites. `boot` mode always needs QEMU.
 
-The CLI first looks for the patched workspace copy at `../third_party/sail-riscv-0.16-debug-v1/bin/sail_riscv_sim`, then the official copy at `../third_party/sail-riscv-0.16/bin/sail_riscv_sim`, then `PATH`. Pass `--sail <PATH>` to select another build. For QEMU, it uses `/opt/homebrew/bin/qemu-system-riscv64` when present and otherwise searches `PATH`.
+On Ubuntu 24.04 x86_64, `scripts/setup-toolchain.sh` builds QEMU 11.1.3 (riscv64-softmmu only) and the patched Sail into `../third_party` (about 35-40 minutes on 4 cores; already-built tools are reused). CI uses the same script.
+
+Tool lookup:
+
+- Sail: `--sail <PATH>`, then `$RIVEMU_LOCKSTEP_SAIL`, then `../third_party/sail-riscv-0.16-debug-v1/bin/sail_riscv_sim`, then `../third_party/sail-riscv-0.16/bin/sail_riscv_sim`, then `PATH`.
+- QEMU: `--qemu <PATH>`, then `$RIVEMU_LOCKSTEP_QEMU`, then `PATH`.
+
+Tests that need QEMU or Sail print a `skipping ...` line when the tool is missing. Set `RIVEMU_LOCKSTEP_REQUIRE_QEMU=1` and `RIVEMU_LOCKSTEP_REQUIRE_SAIL=1` to make a missing tool a failure, as CI does. `RIVEMU_LOCKSTEP_STRESS=1` enables `tests/spawn_stress.rs`, which starts 240 QEMU and 240 Sail targets from six threads to check reference-model startup under contention.
 
 ## Build
 
@@ -39,7 +46,7 @@ target/release/rivemu-lockstep risu \
   --insns 32 \
   --seed 0x1000 \
   --step-check \
-  --qemu ../qemu/build-d7314928-arm-plain/qemu-system-riscv64
+  --qemu ../third_party/qemu-11.1.3/bin/qemu-system-riscv64
 ```
 
 Available suites are:
@@ -91,7 +98,108 @@ target/release/rivemu-lockstep boot \
   --kernel ../qemu_rust/images/linux-test/Image \
   --steps 100 \
   --check-csrs \
-  --qemu ../qemu/build-d7314928-riscv64/qemu-system-riscv64
+  --qemu ../third_party/qemu-11.1.3/bin/qemu-system-riscv64
 ```
 
 Start with a small step count because QEMU is controlled over its GDB remote protocol. Add `--check-csrs` for a short privileged-state comparison after the basic smoke test passes.
+
+Boot mode starts QEMU from rivemu's reset state, so QEMU must be configured
+to match rivemu, and implementation-defined values must be copied:
+
+- **Configuration:** the QEMU CPU model (`QEMU_CPU_PMP`) enables V
+  (VLEN 256), 16 PMP entries with Smepmp, Sscofpmf/Smcntrpmf with
+  hpmcounter3..31, and 4 triggers.
+- **Copied once:** before the first step, rivemu's `menvcfg`, `senvcfg` and
+  `stimecmp` reset values are written into QEMU.
+- **Copied after each read:** results of `csrr` from `cycle`, `time`,
+  `instret`, `mcycle`, `minstret`, `tinfo` and `seed` are copied from QEMU
+  to rivemu.
+
+With OpenSBI v1.7 and Linux 6.12, `--steps 30000000 --check-csrs` runs with
+zero divergences (about 4,700 steps/s).
+`docs/evidence/2026-11-02-boot-lockstep/README.md` lists every divergence
+found on the way and its fix. Two of them were rivemu bugs.
+
+`boot` mode masks interrupts on both sides (QEMU's GDB single step does not
+deliver them, and rivemu does not tick its devices), so Linux eventually
+waits forever for a timer tick. `boot-trace` covers a whole boot instead.
+
+## Trace-driven boot lockstep to the shell prompt (`boot-trace`)
+
+`boot-trace` runs QEMU at full TCG speed with the `rivemu_trace` plugin
+(`qemu-plugin/rivemu_trace.c`), which streams the PC of every instruction,
+the previous instruction's destination register, every trap with the trap
+CSRs, and all integer registers every 2^16 instructions. rivemu steps the
+same instructions in-process and checks each one
+(`src/lockstep/trace.rs`):
+
+- results and control flow must match for every instruction;
+- traps must go to the same target with the same privilege (with V),
+  `mstatus` (compared bits), `mcause`/`mepc`/`mtval`, `scause`/`sepc`/
+  `stval`, `satp`, `hstatus`, `htval` and `mtval2`;
+- QEMU is the reference for device timing: when it takes an interrupt,
+  rivemu takes the same one at the same instruction, and results that rivemu
+  flags with `Hart::nondeterministic_read` (MMIO loads; counter, `time`,
+  `seed`, `tinfo`, `mip`/`sip` CSR reads) are taken from QEMU;
+- one implementation choice is accepted explicitly: QEMU keeps
+  `mstatus.UXL` writable (RV32 user mode), rivemu fixes it at 64 bits, so a
+  `sstatus`/`mstatus` read may differ only in `UXL`/`SXL` and the `FS`/`VS`/
+  `SD` dirty bits (Linux's `compat_mode_detect` does this once).
+
+QEMU gets rivemu's device tree with `-dtb` and the initrd through
+`-device loader` at rivemu's address, so both see identical memory, and the
+plugin writes rivemu's `menvcfg`, `senvcfg` and `stimecmp` reset values into
+QEMU at the firmware entry.
+
+```sh
+scripts/build-qemu-plugin.sh ../third_party/qemu-11.1.3/bin/qemu-system-riscv64
+target/release/rivemu-lockstep boot-trace \
+  --qemu ../third_party/qemu-11.1.3/bin/qemu-system-riscv64 \
+  --bios ../qemu_rust/images/linux-test/fw_dynamic.bin \
+  --kernel ../qemu_rust/images/linux-src/Image \
+  --initrd ../qemu_rust/images/linux-src/rootfs.cpio \
+  --append console=ttyS0 --until-console '~ # '
+```
+
+With OpenSBI v1.7, Linux 6.12 and the BusyBox initramfs
+(`../qemu_rust/scripts/build-linux-test-from-source.sh`), three runs reached
+the shell prompt with zero divergences: 358.6 M to 362.8 M instructions,
+12,129 to 13,077 interrupts mirrored, in 66 to 81 s each. An injected rivemu
+bug (`sraiw` shifting by `imm & 15`) diverges after 18.2 M instructions with
+the exact register. Logs: `docs/evidence/2026-11-03-boot-trace/`. The CI job
+`boot-trace` runs the same boot.
+
+### H extension (`--hypervisor`)
+
+`--hypervisor` turns on H on both sides (QEMU `h=true`, rivemu
+`hypervisor`). `firmware/h_test.S` (`scripts/build-h-firmware.sh`) is a
+self-checking test of the H extension with 160 checks: CSRs, VS/VU-mode,
+virtual-instruction exceptions, delegation, two-stage translation and
+guest-page faults, HLV/HSV, VS-level interrupts and `sret` between modes.
+
+```sh
+scripts/build-h-firmware.sh
+target/release/rivemu-lockstep boot-trace --hypervisor \
+  --qemu ../third_party/qemu-11.1.3/bin/qemu-system-riscv64 \
+  --bios target/firmware/h_test.bin --until-console 'H-TEST PASS'
+```
+
+It passes on QEMU alone, on rivemu alone and in lockstep (43,107
+instructions, 61 exceptions, 4 interrupts mirrored, zero divergences), and
+OpenSBI + Linux with H on both sides reaches the shell prompt with zero
+divergences (364.9 M instructions). QEMU 11.1.3 differs from the privileged
+spec in ten places around H, among them that `mstatus.MPV` is not writable
+and how it sets `mstatus.GVA`. The default build avoids them and the
+lockstep does not compare `mstatus.GVA` (it reports how often QEMU's
+differed). Built with `-DSPEC`, the firmware adds 19 checks for those
+places; the Sail model 0.16 and rivemu pass all of them, QEMU fails 11.
+Details and logs: `docs/evidence/2026-11-03-h-extension/`. The CI job
+`boot-trace` runs the firmware on QEMU alone and on Sail, the spec build on
+rivemu, and both H lockstep runs.
+
+Limitations: rivemu runs through `Hart::step` (the reference interpreter
+path), not the block cache and inline fast paths that `run` uses; those are
+covered by rivemu's block-versus-step equivalence tests, riscv-arch-test and
+the Linux end-to-end tests. Only hart 0 is traced (`-smp 1`), and
+floating-point registers are compared only through the integer results
+they feed into.

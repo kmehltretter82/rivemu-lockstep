@@ -372,10 +372,7 @@ impl BisectReport {
             "    // Decoded: {} ({}-byte insn {:#010x} @ pc={:#010x})",
             self.decoded, self.insn_len, self.insn_word, self.pc
         );
-        let _ = writeln!(
-            out,
-            "    let mut target = RivemuTarget::new_bare(true);"
-        );
+        let _ = writeln!(out, "    let mut target = RivemuTarget::new_bare(true);");
         let _ = writeln!(out, "    let mut state = ArchState::default();");
         let _ = writeln!(out, "    state.pc = {:#018x};", self.pre_state.pc);
         let _ = writeln!(out, "    state.prv = {};", self.pre_state.prv);
@@ -423,11 +420,7 @@ impl BisectReport {
             let _ = writeln!(
                 out,
                 "    // Expected ({}) {} = {:#018x} ({} got {:#018x})",
-                self.reference_name,
-                diff.name,
-                diff.reference,
-                self.candidate_name,
-                diff.candidate
+                self.reference_name, diff.name, diff.reference, self.candidate_name, diff.candidate
             );
         }
         let _ = writeln!(

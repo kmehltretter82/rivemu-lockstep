@@ -6,6 +6,8 @@ use rivemu_core::size::MIB;
 use rivemu_cpu_riscv::decode::{self, Op};
 use rivemu_machine::{MachineConfig, virt::memmap};
 
+pub mod trace;
+
 use crate::risu::BisectReport;
 use crate::risu::Suite;
 use crate::target::{QemuGdbTarget, RivemuTarget};
@@ -27,6 +29,7 @@ impl Drop for TempDtb {
 
 /// Runs an instruction-by-instruction lockstep verification for `bios`, with an optional
 /// `kernel` staged in memory, across M/S/U privilege transitions and `Sv39`/`Sv48` translation.
+/// `pmp` gives QEMU the 16 PMP entries rivemu implements; pass `true` for real firmware.
 ///
 /// This stops only if `wfi` is reached (`RivemuTarget::step_one` steps a hart without ticking
 /// asynchronous device timers).
@@ -36,6 +39,7 @@ pub fn run_firmware_lockstep(
     kernel: Option<&Path>,
     max_steps: usize,
     check_csrs: bool,
+    pmp: bool,
 ) -> Result<Option<BisectReport>, TargetError> {
     let cfg = MachineConfig {
         ram_size: 128 * MIB,
@@ -43,6 +47,9 @@ pub fn run_firmware_lockstep(
         bios: Some(bios.to_path_buf()),
         kernel: kernel.map(Path::to_path_buf),
         icount: Some(0),
+        // Without PMP in QEMU, rivemu must not apply the spec rule that an
+        // S/U access matching no PMP entry fails (its default).
+        strict_pmp: pmp,
         ..MachineConfig::default()
     };
     let mut rivemu = RivemuTarget::from_config(cfg)?;
@@ -70,7 +77,16 @@ pub fn run_firmware_lockstep(
         "-machine",
         "virt",
         "-cpu",
-        "rv64,c=true,h=false,pmp=false,smstateen=true,sv57=true,svnapot=true,zawrs=true,zabha=true,zacas=true,zba=true,zbb=true,zbc=true,zbkb=true,zbkc=true,zbkx=true,zbs=true,zca=true,zcb=true,zcd=true,zcmop=true,zfa=true,zfbfmin=true,zfh=true,zfhmin=true,zicfilp=true,zicfiss=true,zicond=true,zicbom=true,zicbop=true,zicboz=true,zimop=true,zknd=true,zkne=true,zknh=true,zkr=true,zksed=true,zksh=true,zkt=true,ssdbltrp=true,ssnpm=true,smnpm=true,smmpm=true,x-svukte=true,svinval=true,svpbmt=true,svrsw60t59b=true,svvptc=true,sstc=true",
+        // rivemu always implements 16 PMP entries (and Smepmp), and real
+        // firmware such as OpenSBI probes and programs them, so QEMU needs
+        // PMP too. Synthetic images that never program PMP use a PMP-less
+        // QEMU, and rivemu with `strict_pmp` off: with PMP present and no
+        // matching entry the spec denies S/U accesses.
+        if pmp {
+            crate::target::qemu_gdb::QEMU_CPU_PMP
+        } else {
+            crate::target::qemu_gdb::QEMU_CPU
+        },
         "-m",
         "128M",
         "-smp",
@@ -103,6 +119,18 @@ pub fn run_firmware_lockstep(
     }
     let init_state = rivemu.get_state()?;
     qemu.set_state(&init_state)?;
+    // set_state clears CSRs outside ArchState (it is built for RISU blocks),
+    // and these reset values are implementation-specific anyway: for envcfg,
+    // rivemu enables the cache-block and A/D bits, QEMU sets ADUE and PBMTE,
+    // and Sail resets to 0; for stimecmp (reset value UNSPECIFIED in Sstc),
+    // rivemu resets to all-ones so no timer fires and QEMU resets to 0. Give
+    // QEMU rivemu's values so firmware and the kernel read the same.
+    let h = &rivemu.machine.harts[0];
+    let (menvcfg, senvcfg, stimecmp) = (h.csr.menvcfg, h.csr.senvcfg, h.csr.stimecmp);
+    qemu.write_csr(rivemu_cpu_riscv::csr::MENVCFG, menvcfg)?;
+    qemu.write_csr(rivemu_cpu_riscv::csr::SENVCFG, senvcfg)?;
+    qemu.write_csr(rivemu_cpu_riscv::csr::STIMECMP, stimecmp)?;
+    let mut qemu_cached = qemu.get_state()?;
 
     let mut pre_state = init_state;
     for step_index in 0..max_steps {
@@ -166,13 +194,17 @@ pub fn run_firmware_lockstep(
             rivemu.machine.harts[0].x[rd] = q_val;
         }
 
-        // Synchronize hardware counter CSR reads (`time`, `cycle`, `instret`, `mcycle`, `minstret`)
-        // and entropy `seed` (`0x015`) RMW reads from QEMU to rivemu when the instruction retired without trapping.
+        // Synchronize hardware counter CSR reads (`time`, `cycle`, `instret`, `mcycle`, `minstret`),
+        // `tinfo` reads and entropy `seed` (`0x015`) RMW reads from QEMU to rivemu when the
+        // instruction retired without trapping. `tinfo` lists the implementation's trigger
+        // types and Sdtrig version: rivemu reports 0x0100_004c (version 1.0; mcontrol, icount,
+        // mcontrol6), QEMU 11.1.3 0x44 (version 0; mcontrol, mcontrol6), and QEMU has no
+        // property to change that. Firmware then uses only the types both implement.
         if insn_len == 4
             && rivemu.machine.harts[0].pc == pc.wrapping_add(u64::from(insn_len))
             && (matches!(
                 insn_word & 0xfff0_707f,
-                0xc000_2073 | 0xc010_2073 | 0xc020_2073 | 0xb000_2073 | 0xb020_2073
+                0xc000_2073 | 0xc010_2073 | 0xc020_2073 | 0xb000_2073 | 0xb020_2073 | 0x7a40_2073
             ) || (insn_word & 0xfff0_007f) == 0x0150_0073)
         {
             let rd = ((insn_word >> 7) & 0x1f) as usize;
@@ -183,7 +215,30 @@ pub fn run_firmware_lockstep(
         }
 
         let rivemu_post = rivemu.get_state()?;
-        let qemu_post = qemu.get_state()?;
+        // Read only the QEMU state the instruction can have changed: FP
+        // state after FP instructions, privileged state after SYSTEM
+        // instructions or a trap/privilege change on rivemu. Re-read
+        // everything periodically and whenever anything differs, so a stale
+        // cache can neither hide nor invent a divergence.
+        let opcode = insn_word & 0x7f;
+        let is_system = insn_len == 4 && opcode == 0x73;
+        let is_fp = (insn_len == 4 && matches!(opcode, 0x07 | 0x43 | 0x47 | 0x4b | 0x4f | 0x53))
+            || (insn_len == 2 && matches!(insn_word & 0xe003, 0x2000 | 0x2002));
+        let trapped_or_switched = rivemu_post.prv != pre_state.prv
+            || rivemu_post.mcause != pre_state.mcause
+            || rivemu_post.scause != pre_state.scause
+            || rivemu_post.mepc != pre_state.mepc
+            || rivemu_post.sepc != pre_state.sepc;
+        let periodic = step_index % 1000 == 999;
+        let mut qemu_post = qemu.get_state_partial(
+            &qemu_cached,
+            is_fp || is_system || periodic,
+            is_system || trapped_or_switched || periodic,
+        )?;
+        if !rivemu_post.diff(&qemu_post, check_csrs).is_empty() {
+            qemu_post = qemu.get_state()?;
+        }
+        qemu_cached = qemu_post.clone();
         let diffs = rivemu_post.diff(&qemu_post, check_csrs);
         if !diffs.is_empty() {
             let decoded = format!("{decoded_insn:?}");
@@ -214,10 +269,12 @@ mod tests {
 
     #[test]
     fn firmware_lockstep_crosses_mret_sv39_and_compressed_insns() {
-        let qemu_bin = Path::new("/opt/homebrew/bin/qemu-system-riscv64");
-        if !qemu_bin.exists() {
+        let Some(qemu_bin) =
+            crate::tools::qemu_for_test("firmware_lockstep_crosses_mret_sv39_and_compressed_insns")
+        else {
             return;
-        }
+        };
+        let qemu_bin = qemu_bin.as_path();
 
         // Build a flat firmware binary loaded at 0x8000_0000:
         // - M-mode installs a 1 GiB Sv39 root leaf PTE at 0x8000_1000 (mapping 0x8000_0000..0xbfff_ffff
@@ -262,18 +319,22 @@ mod tests {
 
         // 0x0060: S-mode entry under Sv39 translation
         emit32(&mut image, 0x0060, 0x1200_0073); // sfence.vma x0, x0
-        emit16(&mut image, 0x0064, 0x4515);      // c.li a0, 5
-        emit16(&mut image, 0x0066, 0x0509);      // c.addi a0, 2             (a0 = 7)
-        emit16(&mut image, 0x0068, 0x4581);      // c.li a1, 0
-        emit16(&mut image, 0x006a, 0x0001);      // c.nop
-        emit32(&mut image, 0x006c, 0x0e05_d633 | (11 << 20) | (10 << 15) | (12 << 7)); // czero.eqz a2, a0, a1 -> 0
+        emit16(&mut image, 0x0064, 0x4515); // c.li a0, 5
+        emit16(&mut image, 0x0066, 0x0509); // c.addi a0, 2             (a0 = 7)
+        emit16(&mut image, 0x0068, 0x4581); // c.li a1, 0
+        emit16(&mut image, 0x006a, 0x0001); // c.nop
+        emit32(
+            &mut image,
+            0x006c,
+            0x0e05_d633 | (11 << 20) | (10 << 15) | (12 << 7),
+        ); // czero.eqz a2, a0, a1 -> 0
         emit32(&mut image, 0x0070, 0x0000_0073); // ecall -> S-mode stvec @ 0x8000_0100
-        emit16(&mut image, 0x0074, 0x0505);      // c.addi a0, 1             (a0 = 8)
-        emit16(&mut image, 0x0076, 0xa001);      // c.j 0x8000_0076 (infinite loop)
+        emit16(&mut image, 0x0074, 0x0505); // c.addi a0, 1             (a0 = 8)
+        emit16(&mut image, 0x0076, 0xa001); // c.j 0x8000_0076 (infinite loop)
 
         // 0x0100: S-mode trap handler under Sv39 translation
         emit32(&mut image, 0x0100, 0x1410_22f3); // csrr t0, sepc
-        emit16(&mut image, 0x0104, 0x0291);      // c.addi t0, 4
+        emit16(&mut image, 0x0104, 0x0291); // c.addi t0, 4
         emit32(&mut image, 0x0106, 0x1412_9073); // csrw sepc, t0
         emit32(&mut image, 0x010a, 0x1020_0073); // sret
 
@@ -282,7 +343,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::write(&bios_path, &image).unwrap();
-        let res = run_firmware_lockstep(qemu_bin, &bios_path, None, 32, true);
+        let res = run_firmware_lockstep(qemu_bin, &bios_path, None, 32, true, false);
         let _ = std::fs::remove_file(&bios_path);
 
         let report = res.expect("firmware lockstep should succeed");
@@ -291,16 +352,12 @@ mod tests {
 
     #[test]
     fn firmware_lockstep_handles_uart_clint_mmio_and_wfi() {
-        let local_qemu = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../qemu/build-d7314928-riscv64/qemu-system-riscv64");
-        let brew_qemu = Path::new("/opt/homebrew/bin/qemu-system-riscv64");
-        let qemu_bin = if local_qemu.exists() {
-            local_qemu.as_path()
-        } else if brew_qemu.exists() {
-            brew_qemu
-        } else {
+        let Some(qemu_bin) =
+            crate::tools::qemu_for_test("firmware_lockstep_handles_uart_clint_mmio_and_wfi")
+        else {
             return;
         };
+        let qemu_bin = qemu_bin.as_path();
 
         let mut image = vec![0u8; 0x2000];
         fn emit32(image: &mut [u8], offset: usize, word: u32) {
@@ -349,7 +406,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::write(&bios_path, &image).unwrap();
-        let res = run_firmware_lockstep(qemu_bin, &bios_path, None, 28, true);
+        let res = run_firmware_lockstep(qemu_bin, &bios_path, None, 28, true, false);
         let _ = std::fs::remove_file(&bios_path);
 
         let report = res.expect("device-aware firmware lockstep should succeed");

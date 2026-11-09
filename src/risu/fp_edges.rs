@@ -285,13 +285,7 @@ pub(crate) fn generate_case(selector: usize, out: &mut Vec<u32>) {
         }
         41 => {
             clear_fcsr(out);
-            out.push(fp(
-                0x52,
-                GPR_COMPARE_RESULT,
-                0b100,
-                F16_HALF,
-                F16_POS_ONE,
-            )); // fleq.h
+            out.push(fp(0x52, GPR_COMPARE_RESULT, 0b100, F16_HALF, F16_POS_ONE)); // fleq.h
             out.push(fp(
                 0x52,
                 GPR_COMPARE_RESULT,
@@ -386,7 +380,13 @@ mod tests {
                 assert_ne!(insn.op, Op::Illegal, "selector {selector}, raw {raw:#x}");
                 if matches!(
                     insn.op,
-                    Op::Fclass | Op::Feq | Op::Fleq | Op::Fltq | Op::FmvXF | Op::FcvtIntF | Op::FcvtmodWD
+                    Op::Fclass
+                        | Op::Feq
+                        | Op::Fleq
+                        | Op::Fltq
+                        | Op::FmvXF
+                        | Op::FcvtIntF
+                        | Op::FcvtmodWD
                 ) {
                     assert!(!matches!(insn.rd, 8 | 27));
                 }

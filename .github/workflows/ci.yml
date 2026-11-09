@@ -1,0 +1,249 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      rivemu_ref:
+        description: rivemu branch, tag, or commit to test against (default main)
+        required: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: rivemu-lockstep
+      - name: Choose rivemu ref
+        id: rivemu
+        run: rivemu-lockstep/scripts/ci-rivemu-ref.sh "${{ inputs.rivemu_ref }}" "${{ github.head_ref || github.ref_name }}" >> "$GITHUB_OUTPUT"
+      # The path dependencies expect rivemu in the sibling directory ../qemu_rust.
+      - uses: actions/checkout@v5
+        with:
+          repository: kmehltretter82/rivemu
+          ref: ${{ steps.rivemu.outputs.ref }}
+          path: qemu_rust
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rivemu-lockstep
+      - working-directory: rivemu-lockstep
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets
+          cargo test
+
+  deny:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: rivemu-lockstep
+      - name: Choose rivemu ref
+        id: rivemu
+        run: rivemu-lockstep/scripts/ci-rivemu-ref.sh "${{ inputs.rivemu_ref }}" "${{ github.head_ref || github.ref_name }}" >> "$GITHUB_OUTPUT"
+      # cargo-deny resolves the full graph, including the ../qemu_rust path dependencies.
+      - uses: actions/checkout@v5
+        with:
+          repository: kmehltretter82/rivemu
+          ref: ${{ steps.rivemu.outputs.ref }}
+          path: qemu_rust
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: rivemu-lockstep/Cargo.toml
+
+  msrv:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: rivemu-lockstep
+      - name: Choose rivemu ref
+        id: rivemu
+        run: rivemu-lockstep/scripts/ci-rivemu-ref.sh "${{ inputs.rivemu_ref }}" "${{ github.head_ref || github.ref_name }}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v5
+        with:
+          repository: kmehltretter82/rivemu
+          ref: ${{ steps.rivemu.outputs.ref }}
+          path: qemu_rust
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rivemu-lockstep
+      - working-directory: rivemu-lockstep
+        run: cargo +1.85.0 check --all-targets
+
+  differential:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: rivemu-lockstep
+      - name: Choose rivemu ref
+        id: rivemu
+        run: rivemu-lockstep/scripts/ci-rivemu-ref.sh "${{ inputs.rivemu_ref }}" "${{ github.head_ref || github.ref_name }}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v5
+        with:
+          repository: kmehltretter82/rivemu
+          ref: ${{ steps.rivemu.outputs.ref }}
+          path: qemu_rust
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rivemu-lockstep
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build meson flex bison python3-venv python3-tomli \
+            libglib2.0-dev libpixman-1-dev libslirp-dev libfdt-dev zlib1g-dev libgmp-dev z3
+      - uses: actions/cache@v4
+        with:
+          path: |
+            third_party/qemu-11.1.3
+            third_party/sail-0.20.3
+            third_party/sail-riscv-0.16-debug-v1
+          key: lockstep-tools-${{ runner.os }}-${{ hashFiles('rivemu-lockstep/scripts/setup-toolchain.sh', 'rivemu-lockstep/scripts/build-sail-debug-v1.sh', 'rivemu-lockstep/patches/*.patch') }}
+      - name: Build QEMU 11.1.3 and patched Sail 0.16 (cached)
+        run: SKIP_APT=1 rivemu-lockstep/scripts/setup-toolchain.sh "$GITHUB_WORKSPACE/third_party"
+      - run: echo "$GITHUB_WORKSPACE/third_party/qemu-11.1.3/bin" >> "$GITHUB_PATH"
+      - name: Tests with QEMU and Sail required, plus startup stress
+        working-directory: rivemu-lockstep
+        env:
+          RIVEMU_LOCKSTEP_REQUIRE_QEMU: 1
+          RIVEMU_LOCKSTEP_REQUIRE_SAIL: 1
+          RIVEMU_LOCKSTEP_STRESS: 1
+        run: cargo test --release -- --nocapture
+      - name: Per-suite differential runs against QEMU and Sail
+        working-directory: rivemu-lockstep
+        run: scripts/ci-differential.sh "$GITHUB_WORKSPACE/ci-logs"
+      - name: Multi-worker Sail startup check
+        working-directory: rivemu-lockstep
+        run: |
+          scripts/repeat-campaign.sh 5 "$GITHUB_WORKSPACE/ci-logs/sail-6-workers" -- \
+            campaign --reference sail --suite alu --workers 6 --blocks 300 --insns 16
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: differential-logs
+          path: ci-logs
+
+  boot-trace:
+    # Trace-driven lockstep (src/lockstep/trace.rs) of OpenSBI v1.7 + Linux
+    # 6.12 + BusyBox against QEMU, from the firmware entry to the shell
+    # prompt. The Linux images build from pinned sources in rivemu (about 25
+    # min once, then cached).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: rivemu-lockstep
+      - name: Choose rivemu ref
+        id: rivemu
+        run: rivemu-lockstep/scripts/ci-rivemu-ref.sh "${{ inputs.rivemu_ref }}" "${{ github.head_ref || github.ref_name }}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v5
+        with:
+          repository: kmehltretter82/rivemu
+          ref: ${{ steps.rivemu.outputs.ref }}
+          path: qemu_rust
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rivemu-lockstep
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build meson flex bison python3-venv python3-tomli \
+            libglib2.0-dev libpixman-1-dev libslirp-dev libfdt-dev zlib1g-dev libgmp-dev z3 \
+            gcc-riscv64-linux-gnu bc cpio libssl-dev libelf-dev
+      - uses: actions/cache@v4
+        with:
+          path: |
+            third_party/qemu-11.1.3
+            third_party/sail-0.20.3
+            third_party/sail-riscv-0.16-debug-v1
+          key: lockstep-tools-${{ runner.os }}-${{ hashFiles('rivemu-lockstep/scripts/setup-toolchain.sh', 'rivemu-lockstep/scripts/build-sail-debug-v1.sh', 'rivemu-lockstep/patches/*.patch') }}
+      - name: Build QEMU 11.1.3 and patched Sail 0.16 (cached)
+        run: SKIP_APT=1 rivemu-lockstep/scripts/setup-toolchain.sh "$GITHUB_WORKSPACE/third_party"
+      - uses: actions/cache@v4
+        with:
+          path: qemu_rust/images/linux-test
+          key: linux-test-${{ hashFiles('qemu_rust/scripts/fetch-linux-test.sh') }}
+      - run: qemu_rust/scripts/fetch-linux-test.sh
+      - uses: actions/cache@v4
+        with:
+          path: |
+            qemu_rust/images/linux-src/Image
+            qemu_rust/images/linux-src/busybox
+          key: linux-src-${{ hashFiles('qemu_rust/scripts/build-linux-test-from-source.sh') }}
+      - run: qemu_rust/scripts/build-linux-test-from-source.sh
+      - name: Build the rivemu_trace QEMU plugin
+        working-directory: rivemu-lockstep
+        run: scripts/build-qemu-plugin.sh "$GITHUB_WORKSPACE/third_party/qemu-11.1.3/bin/qemu-system-riscv64"
+      - name: Build the H-extension test firmware
+        working-directory: rivemu-lockstep
+        run: scripts/build-h-firmware.sh
+      - name: H-extension firmware on QEMU alone (checks the test's expectations)
+        working-directory: rivemu-lockstep
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/ci-logs"
+          cpu=$(grep -o 'QEMU_CPU_PMP: &str = "[^"]*"' src/target/qemu_gdb.rs \
+            | sed 's/.*= "//; s/"$//; s/h=false/h=true/')
+          timeout 60 "$GITHUB_WORKSPACE/third_party/qemu-11.1.3/bin/qemu-system-riscv64" \
+            -M virt -cpu "$cpu" -m 256M -smp 1 -bios target/firmware/h_test.bin \
+            -display none -monitor none -serial "file:$GITHUB_WORKSPACE/ci-logs/h-test-qemu.log"
+          cat "$GITHUB_WORKSPACE/ci-logs/h-test-qemu.log"
+          grep -q '^H-TEST PASS' "$GITHUB_WORKSPACE/ci-logs/h-test-qemu.log"
+      - name: H-extension firmware with the spec-only checks on the Sail model
+        working-directory: rivemu-lockstep
+        run: |
+          timeout 600 "$GITHUB_WORKSPACE/third_party/sail-riscv-0.16-debug-v1/bin/sail_riscv_sim" \
+            target/firmware/h_test_sail.elf 2>&1 | tee "$GITHUB_WORKSPACE/ci-logs/h-test-sail.log"
+          grep -q '^H-TEST PASS' "$GITHUB_WORKSPACE/ci-logs/h-test-sail.log"
+      - name: Trace lockstep test (required)
+        working-directory: rivemu-lockstep
+        env:
+          RIVEMU_LOCKSTEP_QEMU: ${{ github.workspace }}/third_party/qemu-11.1.3/bin/qemu-system-riscv64
+          RIVEMU_LOCKSTEP_REQUIRE_QEMU: 1
+          RIVEMU_LOCKSTEP_REQUIRE_TRACE: 1
+        run: cargo test --release -- trace_lockstep h_spec_firmware --nocapture
+      - name: Boot lockstep to the shell prompt
+        working-directory: rivemu-lockstep
+        run: |
+          I="$GITHUB_WORKSPACE/qemu_rust/images"
+          mkdir -p "$GITHUB_WORKSPACE/ci-logs"
+          cargo run --release -- boot-trace \
+            --qemu "$GITHUB_WORKSPACE/third_party/qemu-11.1.3/bin/qemu-system-riscv64" \
+            --bios "$I/linux-test/fw_dynamic.bin" --kernel "$I/linux-src/Image" \
+            --initrd "$I/linux-src/rootfs.cpio" --append console=ttyS0 \
+            --until-console '~ # ' 2>&1 | tee "$GITHUB_WORKSPACE/ci-logs/boot-trace.log"
+          grep -q '^PASS: 0 divergences' "$GITHUB_WORKSPACE/ci-logs/boot-trace.log"
+      - name: H extension in lockstep (test firmware, then Linux with H)
+        working-directory: rivemu-lockstep
+        run: |
+          I="$GITHUB_WORKSPACE/qemu_rust/images"
+          Q="$GITHUB_WORKSPACE/third_party/qemu-11.1.3/bin/qemu-system-riscv64"
+          cargo run --release -- boot-trace --hypervisor --qemu "$Q" \
+            --bios target/firmware/h_test.bin --until-console 'H-TEST PASS' 2>&1 \
+            | tee "$GITHUB_WORKSPACE/ci-logs/boot-trace-h-firmware.log"
+          grep -q '^PASS: 0 divergences' "$GITHUB_WORKSPACE/ci-logs/boot-trace-h-firmware.log"
+          cargo run --release -- boot-trace --hypervisor --qemu "$Q" \
+            --bios "$I/linux-test/fw_dynamic.bin" --kernel "$I/linux-src/Image" \
+            --initrd "$I/linux-src/rootfs.cpio" --append console=ttyS0 \
+            --until-console '~ # ' 2>&1 | tee "$GITHUB_WORKSPACE/ci-logs/boot-trace-h-linux.log"
+          grep -q '^PASS: 0 divergences' "$GITHUB_WORKSPACE/ci-logs/boot-trace-h-linux.log"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: boot-trace-log
+          path: ci-logs

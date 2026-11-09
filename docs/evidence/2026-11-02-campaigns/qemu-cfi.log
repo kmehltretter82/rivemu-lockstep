@@ -1,0 +1,22 @@
+START: campaign reference=qemu suite=cfi workers=2 max_blocks=512 insns_per_block=32 start_seed=0x20000
+PROGRESS: reference=qemu suite=cfi completed_blocks=25 insns_tested=800 latest_seed=0x20017 elapsed=9.54s
+PROGRESS: reference=qemu suite=cfi completed_blocks=50 insns_tested=1600 latest_seed=0x2002f elapsed=15.81s
+PROGRESS: reference=qemu suite=cfi completed_blocks=75 insns_tested=2400 latest_seed=0x2004a elapsed=23.64s
+PROGRESS: reference=qemu suite=cfi completed_blocks=100 insns_tested=3200 latest_seed=0x20064 elapsed=32.84s
+PROGRESS: reference=qemu suite=cfi completed_blocks=125 insns_tested=4000 latest_seed=0x2007b elapsed=41.45s
+PROGRESS: reference=qemu suite=cfi completed_blocks=150 insns_tested=4800 latest_seed=0x20096 elapsed=49.84s
+PROGRESS: reference=qemu suite=cfi completed_blocks=175 insns_tested=5600 latest_seed=0x200ad elapsed=57.16s
+PROGRESS: reference=qemu suite=cfi completed_blocks=200 insns_tested=6400 latest_seed=0x200c8 elapsed=66.28s
+PROGRESS: reference=qemu suite=cfi completed_blocks=225 insns_tested=7200 latest_seed=0x200df elapsed=75.96s
+PROGRESS: reference=qemu suite=cfi completed_blocks=250 insns_tested=8000 latest_seed=0x200f7 elapsed=83.39s
+PROGRESS: reference=qemu suite=cfi completed_blocks=275 insns_tested=8800 latest_seed=0x20112 elapsed=92.41s
+PROGRESS: reference=qemu suite=cfi completed_blocks=300 insns_tested=9600 latest_seed=0x2012c elapsed=99.31s
+PROGRESS: reference=qemu suite=cfi completed_blocks=325 insns_tested=10400 latest_seed=0x20143 elapsed=106.53s
+PROGRESS: reference=qemu suite=cfi completed_blocks=350 insns_tested=11200 latest_seed=0x2015b elapsed=115.89s
+PROGRESS: reference=qemu suite=cfi completed_blocks=375 insns_tested=12000 latest_seed=0x20175 elapsed=126.35s
+PROGRESS: reference=qemu suite=cfi completed_blocks=400 insns_tested=12800 latest_seed=0x20190 elapsed=135.47s
+PROGRESS: reference=qemu suite=cfi completed_blocks=425 insns_tested=13600 latest_seed=0x201a9 elapsed=143.54s
+PROGRESS: reference=qemu suite=cfi completed_blocks=450 insns_tested=14400 latest_seed=0x201bf elapsed=152.41s
+PROGRESS: reference=qemu suite=cfi completed_blocks=475 insns_tested=15200 latest_seed=0x201da elapsed=159.01s
+PROGRESS: reference=qemu suite=cfi completed_blocks=500 insns_tested=16000 latest_seed=0x201f4 elapsed=164.67s
+PASS: campaign reference=qemu suite=cfi workers=2 blocks=512 requested_insns_per_block=32 requested_insns_total=16384 start_seed=0x20000 elapsed=168.53s

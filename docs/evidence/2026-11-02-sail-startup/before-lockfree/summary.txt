@@ -1,0 +1,26 @@
+# Original lock-free transport (197993f with SAIL_SPAWN_LOCK removed), Linux x86_64, 4 vCPUs.
+# Command: campaign --reference sail --suite alu --workers 6 --blocks 300 --insns 16
+sailexp/run1: PASS: campaign reference=sail suite=int-alu workers=6 blocks=300 requested_insns_per_block=16 requested_insns_total=4800 start_seed=0x1000 elapsed=6.66s
+sailexp/run2: error at block 281 (suite=int-alu, seed=0x1119): I/O error: Connection reset by peer (os error 104)
+sailexp/run3: error at block 140 (suite=int-alu, seed=0x108c): I/O error: Connection reset by peer (os error 104)
+sailexp/run4: PASS: campaign reference=sail suite=int-alu workers=6 blocks=300 requested_insns_per_block=16 requested_insns_total=4800 start_seed=0x1000 elapsed=6.70s
+sailexp/run5: error at block 120 (suite=int-alu, seed=0x1078): I/O error: Connection reset by peer (os error 104)
+sailexp/run6: PASS: campaign reference=sail suite=int-alu workers=6 blocks=300 requested_insns_per_block=16 requested_insns_total=4800 start_seed=0x1000 elapsed=6.74s
+sailexp/run7: PASS: campaign reference=sail suite=int-alu workers=6 blocks=300 requested_insns_per_block=16 requested_insns_total=4800 start_seed=0x1000 elapsed=6.64s
+sailexp/run8: PASS: campaign reference=sail suite=int-alu workers=6 blocks=300 requested_insns_per_block=16 requested_insns_total=4800 start_seed=0x1000 elapsed=6.88s
+sailexp/run9: PASS: campaign reference=sail suite=int-alu workers=6 blocks=300 requested_insns_per_block=16 requested_insns_total=4800 start_seed=0x1000 elapsed=6.73s
+sailexp/run10: PASS: campaign reference=sail suite=int-alu workers=6 blocks=300 requested_insns_per_block=16 requested_insns_total=4800 start_seed=0x1000 elapsed=6.69s
+sailexp/run11: PASS: campaign reference=sail suite=int-alu workers=6 blocks=300 requested_insns_per_block=16 requested_insns_total=4800 start_seed=0x1000 elapsed=6.73s
+sailexp/run12: PASS: campaign reference=sail suite=int-alu workers=6 blocks=300 requested_insns_per_block=16 requested_insns_total=4800 start_seed=0x1000 elapsed=6.62s
+sailexp2/run1: error at block 202 (suite=int-alu, seed=0x10ca): I/O error: Connection reset by peer (os error 104)
+sailexp2/run2: PASS: campaign reference=sail suite=int-alu workers=6 blocks=300 requested_insns_per_block=16 requested_insns_total=4800 start_seed=0x1000 elapsed=6.87s
+sailexp2/run3: PASS: campaign reference=sail suite=int-alu workers=6 blocks=300 requested_insns_per_block=16 requested_insns_total=4800 start_seed=0x1000 elapsed=6.46s
+sailexp2/run4: error at block 248 (suite=int-alu, seed=0x10f8): I/O error: Connection reset by peer (os error 104)
+sailexp2/run5: PASS: campaign reference=sail suite=int-alu workers=6 blocks=300 requested_insns_per_block=16 requested_insns_total=4800 start_seed=0x1000 elapsed=6.73s
+sailexp2/run6: PASS: campaign reference=sail suite=int-alu workers=6 blocks=300 requested_insns_per_block=16 requested_insns_total=4800 start_seed=0x1000 elapsed=6.74s
+sailexp2/run7: PASS: campaign reference=sail suite=int-alu workers=6 blocks=300 requested_insns_per_block=16 requested_insns_total=4800 start_seed=0x1000 elapsed=6.99s
+sailexp2/run8: PASS: campaign reference=sail suite=int-alu workers=6 blocks=300 requested_insns_per_block=16 requested_insns_total=4800 start_seed=0x1000 elapsed=7.00s
+sailexp2/run9: PASS: campaign reference=sail suite=int-alu workers=6 blocks=300 requested_insns_per_block=16 requested_insns_total=4800 start_seed=0x1000 elapsed=6.70s
+sailexp2/run10: PASS: campaign reference=sail suite=int-alu workers=6 blocks=300 requested_insns_per_block=16 requested_insns_total=4800 start_seed=0x1000 elapsed=6.94s
+sailexp2/run11: error at block 285 (suite=int-alu, seed=0x111d): I/O error: Connection reset by peer (os error 104)
+sailexp2/run12: error at block 144 (suite=int-alu, seed=0x1090): I/O error: Connection reset by peer (os error 104)

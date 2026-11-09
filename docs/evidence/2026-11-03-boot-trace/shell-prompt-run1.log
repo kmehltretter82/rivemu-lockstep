@@ -1,0 +1,74 @@
+# rivemu-lockstep boot-trace run 1, QEMU 11.1.3 + qemu-plugin/rivemu_trace.c, OpenSBI v1.7 + Linux 6.12 + BusyBox initramfs (images/linux-src), --until-console '~ # '
+# sha256: 4be292368f8c2437 fw_dynamic.bin, 3994b77eacbef88b Image, 03384768f7a2646e rootfs.cpio
+boot-trace: 362807296 instructions compared in 80.5 s (13077 interrupts mirrored, 1416 exceptions, 109836 device-dependent reads copied, 1 WARL status reads, 5537 snapshots)
+--- console (last 4 KiB) ---
+  41.206524] pci-host-generic 30000000.pci: host bridge /soc/pci@30000000 ranges:
+[   41.215105] pci-host-generic 30000000.pci:       IO 0x0003000000..0x000300ffff -> 0x0000000000
+[   41.218053] pci-host-generic 30000000.pci:      MEM 0x0040000000..0x007fffffff -> 0x0040000000
+[   41.229338] pci-host-generic 30000000.pci: ECAM at [mem 0x30000000-0x3fffffff] for [bus 00-ff]
+[   41.255507] pci-host-generic 30000000.pci: PCI host bridge to bus 0000:00
+[   41.258383] pci_bus 0000:00: root bus resource [bus 00-ff]
+[   41.259234] pci_bus 0000:00: root bus resource [io  0x0000-0xffff]
+[   41.259697] pci_bus 0000:00: root bus resource [mem 0x40000000-0x7fffffff]
+[   41.271727] pci 0000:00:00.0: [1b36:0008] type 00 class 0x060000 conventional PCI endpoint
+[   41.358299] pci_bus 0000:00: resource 4 [io  0x0000-0xffff]
+[   41.364522] pci_bus 0000:00: resource 5 [mem 0x40000000-0x7fffffff]
+[   41.468943] SBI CPPC extension NOT detected!!
+[   49.404469] Serial: 8250/16550 driver, 4 ports, IRQ sharing disabled
+[   49.762611] printk: legacy console [ttyS0] disabled
+[   49.824931] 10000000.serial: ttyS0 at MMIO 0x10000000 (irq = 12, base_baud = 230400) is a 16550A
+[   49.830375] printk: legacy console [ttyS0] enabled
+[   50.349006] [drm] radeon kernel modesetting enabled.
+[   51.460232] loop: module loaded
+[   52.205503] CAN device driver interface
+[   52.231655] e1000e: Intel(R) PRO/1000 Network Driver
+[   52.234324] e1000e: Copyright(c) 1999 - 2015 Intel Corporation.
+[   52.437967] usbcore: registered new interface driver uas
+[   52.443856] usbcore: registered new interface driver usb-storage
+[   52.574794] mousedev: PS/2 mouse device common for all mice
+[   52.686837] goldfish_rtc 101000.rtc: registered as rtc0
+[   52.691102] goldfish_rtc 101000.rtc: setting system clock to 2026-11-03T07:32:38 UTC (1793691158)
+[   52.727706] i2c_dev: i2c /dev entries driver
+[   52.979236] device-mapper: ioctl: 4.48.0-ioctl (2023-03-01) initialised: dm-devel@lists.linux.dev
+[   53.061055] sdhci: Secure Digital Host Controller Interface driver
+[   53.067133] sdhci: Copyright(c) Pierre Ossman
+[   53.069710] Synopsys Designware Multimedia Card Interface Driver
+[   53.101003] sdhci-pltfm: SDHCI platform and OF driver helper
+[   53.151786] usbcore: registered new interface driver usbhid
+[   53.154226] usbhid: USB HID core driver
+[   53.201657] riscv-pmu-sbi: SBI PMU extension is available
+[   53.215608] riscv-pmu-sbi: 16 firmware and 31 hardware counters
+[   53.522881] IPVS: Registered protocols (TCP, UDP)
+[   53.533615] IPVS: Connection hash table configured (size=4096, memory=32Kbytes)
+[   53.592636] IPVS: ipvs loaded.
+[   53.594781] IPVS: [rr] scheduler registered.
+[   53.631630] Initializing XFRM netlink socket
+[   53.645096] NET: Registered PF_INET6 protocol family
+[   53.772437] Segment Routing with IPv6
+[   53.777937] In-situ OAM (IOAM) with IPv6
+[   53.800622] sit: IPv6, IPv4 and MPLS over IPv4 tunneling driver
+[   53.886234] NET: Registered PF_PACKET protocol family
+[   53.898431] Bridge firewalling registered
+[   53.901075] can: controller area network core
+[   53.911080] NET: Registered PF_CAN protocol family
+[   53.912818] can: raw protocol
+[   53.914406] can: broadcast manager protocol
+[   53.922452] can: netlink gateway - max_hops=1
+[   53.941201] 8021q: 802.1Q VLAN Support v1.8
+[   53.961052] 9pnet: Installing 9P2000 support
+[   53.971719] Key type dns_resolver registered
+[   54.006208] NET: Registered PF_VSOCK protocol family
+[   60.431264] debug_vm_pgtable: [debug_vm_pgtable         ]: Validating architecture page table helpers
+[   60.878029] Btrfs loaded, zoned=no, fsverity=no
+[   60.942467] clk: Disabling unused clocks
+[   60.945625] PM: genpd: Disabling unused power domains
+[   60.952936] ALSA device list:
+[   60.954386]   No soundcards found.
+[   61.289413] Freeing unused kernel image (initmem) memory: 2284K
+[   61.301215] Run /init as init process
+=== rivemu BusyBox initramfs (built from source) ===
+Linux 6.12.0 riscv64
+sh: can't access tty; job control turned off
+~ # 
+---
+PASS: 0 divergences

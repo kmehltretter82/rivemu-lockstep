@@ -1,0 +1,1 @@
+PASS: reference=qemu suite=scalar-crypto blocks=16 requested_insns_per_block=32 requested_insns_total=512 start_seed=0x1000 step_check=true elapsed=871.35ms

@@ -1,0 +1,22 @@
+START: campaign reference=qemu suite=pmp workers=2 max_blocks=512 insns_per_block=32 start_seed=0x20000
+PROGRESS: reference=qemu suite=pmp completed_blocks=25 insns_tested=800 latest_seed=0x20018 elapsed=13.66s
+PROGRESS: reference=qemu suite=pmp completed_blocks=50 insns_tested=1600 latest_seed=0x20031 elapsed=28.40s
+PROGRESS: reference=qemu suite=pmp completed_blocks=75 insns_tested=2400 latest_seed=0x2004a elapsed=42.27s
+PROGRESS: reference=qemu suite=pmp completed_blocks=100 insns_tested=3200 latest_seed=0x20063 elapsed=56.27s
+PROGRESS: reference=qemu suite=pmp completed_blocks=125 insns_tested=4000 latest_seed=0x2007c elapsed=71.08s
+PROGRESS: reference=qemu suite=pmp completed_blocks=150 insns_tested=4800 latest_seed=0x20094 elapsed=85.61s
+PROGRESS: reference=qemu suite=pmp completed_blocks=175 insns_tested=5600 latest_seed=0x200af elapsed=98.72s
+PROGRESS: reference=qemu suite=pmp completed_blocks=200 insns_tested=6400 latest_seed=0x200c6 elapsed=111.57s
+PROGRESS: reference=qemu suite=pmp completed_blocks=225 insns_tested=7200 latest_seed=0x200e0 elapsed=125.78s
+PROGRESS: reference=qemu suite=pmp completed_blocks=250 insns_tested=8000 latest_seed=0x200fa elapsed=140.21s
+PROGRESS: reference=qemu suite=pmp completed_blocks=275 insns_tested=8800 latest_seed=0x20112 elapsed=153.58s
+PROGRESS: reference=qemu suite=pmp completed_blocks=300 insns_tested=9600 latest_seed=0x2012b elapsed=166.83s
+PROGRESS: reference=qemu suite=pmp completed_blocks=325 insns_tested=10400 latest_seed=0x20145 elapsed=179.15s
+PROGRESS: reference=qemu suite=pmp completed_blocks=350 insns_tested=11200 latest_seed=0x2015d elapsed=194.38s
+PROGRESS: reference=qemu suite=pmp completed_blocks=375 insns_tested=12000 latest_seed=0x20177 elapsed=208.42s
+PROGRESS: reference=qemu suite=pmp completed_blocks=400 insns_tested=12800 latest_seed=0x2018f elapsed=222.11s
+PROGRESS: reference=qemu suite=pmp completed_blocks=425 insns_tested=13600 latest_seed=0x201a8 elapsed=237.58s
+PROGRESS: reference=qemu suite=pmp completed_blocks=450 insns_tested=14400 latest_seed=0x201c1 elapsed=249.32s
+PROGRESS: reference=qemu suite=pmp completed_blocks=475 insns_tested=15200 latest_seed=0x201da elapsed=263.77s
+PROGRESS: reference=qemu suite=pmp completed_blocks=500 insns_tested=16000 latest_seed=0x201f3 elapsed=278.31s
+PASS: campaign reference=qemu suite=pmp workers=2 blocks=512 requested_insns_per_block=32 requested_insns_total=16384 start_seed=0x20000 elapsed=285.00s

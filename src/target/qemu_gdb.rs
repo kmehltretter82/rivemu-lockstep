@@ -1,9 +1,10 @@
 //! Real `qemu-system-riscv64` cosimulation target driven over the GDB Remote Serial Protocol.
 
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::path::Path;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use rivemu_cpu_riscv::csr;
@@ -14,11 +15,28 @@ use crate::{ArchState, CosimTarget, StopReason, TargetError};
 const CSR_GDB_BASE: u32 = 66;
 /// GDB register index for `priv` (`riscv-64bit-virtual.xml`).
 const PRIV_GDB_REG: u32 = 65;
+/// Time allowed for QEMU to open its GDB socket on a loaded host.
+const QEMU_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// QEMU `-cpu` model matching rivemu's ISA (RV64GCV, VLEN = 256, and the
+/// RVA23 extensions rivemu implements), with PMP disabled. The PMU (hpmcounter3..31 with
+/// Sscofpmf/Smcntrpmf), the 4 Sdtrig triggers and the ID CSRs (`mvendorid`, `marchid`,
+/// `mimpid` = 0; QEMU's default `marchid` is 0x2a) match rivemu so that firmware probing
+/// them reads the same values.
+pub const QEMU_CPU: &str = "rv64,c=true,v=true,vlen=256,elen=64,h=false,pmp=false,smstateen=true,sv57=true,svnapot=true,zawrs=true,zabha=true,zacas=true,zba=true,zbb=true,zbc=true,zbkb=true,zbkc=true,zbkx=true,zbs=true,zca=true,zcb=true,zcd=true,zcmop=true,zfa=true,zfbfmin=true,zfh=true,zfhmin=true,zicfilp=true,zicfiss=true,zicond=true,zicbom=true,zicbop=true,zicboz=true,zimop=true,zknd=true,zkne=true,zknh=true,zkr=true,zksed=true,zksh=true,zkt=true,ssdbltrp=true,sscofpmf=true,smcntrpmf=true,pmu-mask=0xfffffff8,ssnpm=true,smnpm=true,smmpm=true,x-svukte=true,svinval=true,svpbmt=true,svrsw60t59b=true,svvptc=true,sstc=true,num-triggers=4,mvendorid=0,marchid=0,mimpid=0";
+/// [`QEMU_CPU`] with 16 PMP entries and Smepmp.
+pub const QEMU_CPU_PMP: &str = "rv64,c=true,v=true,vlen=256,elen=64,h=false,pmp=true,smepmp=true,smstateen=true,sv57=true,svnapot=true,zawrs=true,zabha=true,zacas=true,zba=true,zbb=true,zbc=true,zbkb=true,zbkc=true,zbkx=true,zbs=true,zca=true,zcb=true,zcd=true,zcmop=true,zfa=true,zfbfmin=true,zfh=true,zfhmin=true,zicfilp=true,zicfiss=true,zicond=true,zicbom=true,zicbop=true,zicboz=true,zimop=true,zknd=true,zkne=true,zknh=true,zkr=true,zksed=true,zksh=true,zkt=true,ssdbltrp=true,sscofpmf=true,smcntrpmf=true,pmu-mask=0xfffffff8,ssnpm=true,smnpm=true,smmpm=true,x-svukte=true,svinval=true,svpbmt=true,svrsw60t59b=true,svvptc=true,sstc=true,num-triggers=4,mvendorid=0,marchid=0,mimpid=0";
 
 /// Persistent `qemu-system-riscv64` process controlled via GDB RSP.
 pub struct QemuGdbTarget {
     child: Child,
-    stream: TcpStream,
+    /// Write half of the GDB connection.
+    stream: UnixStream,
+    /// Buffered read half: replies are parsed byte by byte, and reading
+    /// them one `read` syscall per byte dominated the cost of a step.
+    reader: BufReader<UnixStream>,
+    /// Unix socket on which this QEMU serves its GDB stub.
+    socket_path: PathBuf,
     /// Whether to read/write privileged trap CSRs (`mstatus`, `mcause`, `mtval`, `mepc`, `satp`) on every state sync.
     pub sync_csrs: bool,
     pmp_enabled: bool,
@@ -35,11 +53,7 @@ impl QemuGdbTarget {
 
     /// Spawns a bare-metal `qemu-system-riscv64` instance (`-bios none`) with configurable PMP support.
     pub fn spawn_bare_with_pmp(qemu_bin: &Path, pmp_enabled: bool) -> Result<Self, TargetError> {
-        let cpu_arg = if pmp_enabled {
-            "rv64,c=true,v=true,vlen=256,elen=64,h=false,pmp=true,smepmp=true,smstateen=true,sv57=true,svnapot=true,zawrs=true,zabha=true,zacas=true,zba=true,zbb=true,zbc=true,zbkb=true,zbkc=true,zbkx=true,zbs=true,zca=true,zcb=true,zcd=true,zcmop=true,zfa=true,zfbfmin=true,zfh=true,zfhmin=true,zicfilp=true,zicfiss=true,zicond=true,zicbom=true,zicbop=true,zicboz=true,zimop=true,zknd=true,zkne=true,zknh=true,zkr=true,zksed=true,zksh=true,zkt=true,ssdbltrp=true,ssnpm=true,smnpm=true,smmpm=true,x-svukte=true,svinval=true,svpbmt=true,svrsw60t59b=true,svvptc=true,sstc=true"
-        } else {
-            "rv64,c=true,v=true,vlen=256,elen=64,h=false,pmp=false,smstateen=true,sv57=true,svnapot=true,zawrs=true,zabha=true,zacas=true,zba=true,zbb=true,zbc=true,zbkb=true,zbkc=true,zbkx=true,zbs=true,zca=true,zcb=true,zcd=true,zcmop=true,zfa=true,zfbfmin=true,zfh=true,zfhmin=true,zicfilp=true,zicfiss=true,zicond=true,zicbom=true,zicbop=true,zicboz=true,zimop=true,zknd=true,zkne=true,zknh=true,zkr=true,zksed=true,zksh=true,zkt=true,ssdbltrp=true,ssnpm=true,smnpm=true,smmpm=true,x-svukte=true,svinval=true,svpbmt=true,svrsw60t59b=true,svvptc=true,sstc=true"
-        };
+        let cpu_arg = if pmp_enabled { QEMU_CPU_PMP } else { QEMU_CPU };
         let mut target = Self::spawn_with_args(
             qemu_bin,
             &[
@@ -57,8 +71,13 @@ impl QemuGdbTarget {
     /// Spawns `qemu-system-riscv64` with custom machine/boot arguments and connects to its GDB stub.
     pub fn spawn_with_args(qemu_bin: &Path, extra_args: &[&str]) -> Result<Self, TargetError> {
         let has_v = extra_args.iter().any(|arg| arg.contains("v=true"));
-        let port = pick_free_port()?;
-        let gdb_arg = format!("tcp:127.0.0.1:{port}");
+        // Serve the GDB stub on a Unix socket with a path unique to this
+        // process and spawn. Unlike a TCP port picked in advance, no other
+        // socket can be listening on it, so the connection below can only
+        // reach this QEMU.
+        let socket_path = unique_socket_path();
+        let _ = std::fs::remove_file(&socket_path);
+        let gdb_arg = format!("unix:{},server=on,wait=off", socket_path.display());
         let mut cmd = Command::new(qemu_bin);
         cmd.args(extra_args)
             .args([
@@ -76,14 +95,15 @@ impl QemuGdbTarget {
             .stderr(Stdio::null());
 
         let mut child = cmd.spawn()?;
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + QEMU_STARTUP_TIMEOUT;
         let stream = loop {
             if let Some(status) = child.try_wait()? {
+                let _ = std::fs::remove_file(&socket_path);
                 return Err(TargetError::Protocol(format!(
                     "qemu-system-riscv64 exited early with {status}"
                 )));
             }
-            match TcpStream::connect(("127.0.0.1", port)) {
+            match UnixStream::connect(&socket_path) {
                 Ok(s) => break s,
                 Err(_) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(15));
@@ -91,22 +111,39 @@ impl QemuGdbTarget {
                 Err(e) => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(TargetError::Io(e));
+                    let _ = std::fs::remove_file(&socket_path);
+                    return Err(TargetError::Protocol(format!(
+                        "qemu-system-riscv64 did not open its GDB socket {} within {}s: {e}",
+                        socket_path.display(),
+                        QEMU_STARTUP_TIMEOUT.as_secs()
+                    )));
                 }
             }
         };
-        stream.set_nodelay(true)?;
-        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
 
+        let reader = BufReader::new(stream.try_clone()?);
         let mut target = Self {
             child,
             stream,
+            reader,
+            socket_path,
             sync_csrs: true,
             pmp_enabled: false,
             no_ack_mode: false,
-            priv_gdb_reg: if has_v { PRIV_GDB_REG + 32 } else { PRIV_GDB_REG },
-            csr_gdb_base: if has_v { CSR_GDB_BASE + 32 } else { CSR_GDB_BASE },
+            priv_gdb_reg: if has_v {
+                PRIV_GDB_REG + 32
+            } else {
+                PRIV_GDB_REG
+            },
+            csr_gdb_base: if has_v {
+                CSR_GDB_BASE + 32
+            } else {
+                CSR_GDB_BASE
+            },
         };
+        target
+            .stream
+            .set_read_timeout(Some(Duration::from_secs(10)))?;
         let supported = target.cmd("qSupported:multiprocess+;xmlRegisters=i386")?;
         if supported
             .split(';')
@@ -120,32 +157,55 @@ impl QemuGdbTarget {
 
     /// Sends a GDB RSP command payload (without `$` or `#xx`) and returns the decoded response body.
     pub fn cmd(&mut self, payload: &str) -> Result<String, TargetError> {
-        let sum: u8 = payload.bytes().fold(0u8, u8::wrapping_add);
-        let frame = format!("${payload}#{sum:02x}");
-        self.stream.write_all(frame.as_bytes())?;
+        self.stream.write_all(rsp_frame(payload).as_bytes())?;
+        self.recv_reply()
+    }
 
-        let mut buf = [0u8; 1];
-        // Read until `$`
-        loop {
-            self.stream.read_exact(&mut buf)?;
-            if buf[0] == b'$' {
-                break;
-            }
+    /// Sends several commands in one write and returns their replies in
+    /// order. QEMU's stub handles packets sequentially, so pipelining turns
+    /// one round trip per command into one round trip per batch. Without
+    /// no-ack mode the per-packet acknowledgements would interleave, so the
+    /// commands are then sent one at a time.
+    pub fn cmd_batch(&mut self, payloads: &[String]) -> Result<Vec<String>, TargetError> {
+        if !self.no_ack_mode {
+            return payloads.iter().map(|p| self.cmd(p)).collect();
+        }
+        let frames: String = payloads.iter().map(|p| rsp_frame(p)).collect();
+        self.stream.write_all(frames.as_bytes())?;
+        payloads.iter().map(|_| self.recv_reply()).collect()
+    }
+
+    /// Reads one `$...#xx` reply, acknowledging it unless no-ack mode is on.
+    fn recv_reply(&mut self) -> Result<String, TargetError> {
+        let mut skipped = Vec::new();
+        self.reader.read_until(b'$', &mut skipped)?;
+        if skipped.last() != Some(&b'$') {
+            return Err(TargetError::Protocol(
+                "GDB connection closed before a reply".into(),
+            ));
         }
         let mut body = Vec::with_capacity(64);
-        loop {
-            self.stream.read_exact(&mut buf)?;
-            if buf[0] == b'#' {
-                break;
-            }
-            body.push(buf[0]);
+        self.reader.read_until(b'#', &mut body)?;
+        if body.pop() != Some(b'#') {
+            return Err(TargetError::Protocol(
+                "GDB connection closed inside a reply".into(),
+            ));
         }
         let mut chk = [0u8; 2];
-        self.stream.read_exact(&mut chk)?;
+        self.reader.read_exact(&mut chk)?;
         if !self.no_ack_mode {
             self.stream.write_all(b"+")?;
         }
         String::from_utf8(body).map_err(|e| TargetError::Protocol(e.to_string()))
+    }
+
+    /// Reads several registers with one pipelined batch.
+    fn read_regs(&mut self, regnums: &[u32]) -> Result<Vec<u64>, TargetError> {
+        let payloads: Vec<String> = regnums.iter().map(|r| format!("p{r:x}")).collect();
+        self.cmd_batch(&payloads)?
+            .iter()
+            .map(|reply| decode_le_hex_u64(reply))
+            .collect()
     }
 
     /// Reads a single 64-bit GDB register by its GDB register number (`p <regnum>`).
@@ -174,6 +234,62 @@ impl QemuGdbTarget {
     /// Writes a RISC-V CSR by its architectural 12-bit CSR address.
     pub fn write_csr(&mut self, csr_addr: u16, val: u64) -> Result<(), TargetError> {
         self.write_reg(self.csr_gdb_base + u32::from(csr_addr), val)
+    }
+}
+
+impl QemuGdbTarget {
+    /// Reads the state needed after one step, reusing `cached` for groups
+    /// that the stepped instruction cannot have changed: FPRs/fcsr unless
+    /// `read_fp`, and the privileged CSRs unless `read_csrs`. GPRs and the PC
+    /// are always read. Each QEMU stub packet costs tens of microseconds, so
+    /// skipping the 45 reads that most steps do not need speeds up boot
+    /// lockstep several times.
+    pub fn get_state_partial(
+        &mut self,
+        cached: &ArchState,
+        read_fp: bool,
+        read_csrs: bool,
+    ) -> Result<ArchState, TargetError> {
+        if read_fp && read_csrs {
+            return self.get_state();
+        }
+        let saved = self.sync_csrs;
+        let mut state = if read_fp {
+            self.sync_csrs = false;
+            let result = self.get_state();
+            self.sync_csrs = saved;
+            result?
+        } else {
+            let g_resp = self.cmd("g")?;
+            if g_resp.len() < 33 * 16 {
+                return Err(TargetError::Protocol(format!(
+                    "short GDB 'g' reply ({} chars)",
+                    g_resp.len()
+                )));
+            }
+            let mut state = cached.clone();
+            for i in 0..32 {
+                state.x[i] = decode_le_hex_u64(&g_resp[i * 16..(i + 1) * 16])?;
+            }
+            state.pc = decode_le_hex_u64(&g_resp[32 * 16..33 * 16])?;
+            state
+        };
+        if !read_csrs || !self.sync_csrs {
+            // Keep the cached privileged state.
+            state.prv = cached.prv;
+            state.mstatus = cached.mstatus;
+            state.mepc = cached.mepc;
+            state.mcause = cached.mcause;
+            state.mtval = cached.mtval;
+            state.sstatus = cached.sstatus;
+            state.sepc = cached.sepc;
+            state.scause = cached.scause;
+            state.stval = cached.stval;
+            state.stvec = cached.stvec;
+            state.medeleg = cached.medeleg;
+            state.satp = cached.satp;
+        }
+        Ok(state)
     }
 }
 
@@ -298,25 +414,38 @@ impl CosimTarget for QemuGdbTarget {
         }
         let pc = decode_le_hex_u64(&g_resp[32 * 16..33 * 16])?;
 
-        let mut f = [0u64; 32];
-        for (i, value) in f.iter_mut().enumerate() {
-            *value = self.read_reg(33 + i as u32)?;
+        // FPRs, fcsr and (optionally) the privileged state in one batch.
+        let mut regnums: Vec<u32> = (33..65).collect();
+        regnums.push(self.csr_gdb_base + u32::from(csr::FCSR));
+        if self.sync_csrs {
+            regnums.push(self.priv_gdb_reg);
+            for csr_addr in [
+                csr::MSTATUS,
+                csr::MEPC,
+                csr::MCAUSE,
+                csr::MTVAL,
+                csr::SSTATUS,
+                csr::SEPC,
+                csr::SCAUSE,
+                csr::STVAL,
+                csr::STVEC,
+                csr::MEDELEG,
+            ] {
+                regnums.push(self.csr_gdb_base + u32::from(csr_addr));
+            }
         }
-        let fcsr = (self.read_csr(csr::FCSR)? & 0xff) as u32;
+        let values = self.read_regs(&regnums)?;
+        let mut f = [0u64; 32];
+        f.copy_from_slice(&values[..32]);
+        let fcsr = (values[32] & 0xff) as u32;
 
         let (prv, mstatus, mepc, mcause, mtval, sstatus, sepc, scause, stval, stvec, medeleg, satp) =
             if self.sync_csrs {
-                let prv = (self.read_reg(self.priv_gdb_reg)? & 3) as u8;
-                let mstatus = self.read_csr(csr::MSTATUS)?;
-                let mepc = self.read_csr(csr::MEPC)?;
-                let mcause = self.read_csr(csr::MCAUSE)?;
-                let mtval = self.read_csr(csr::MTVAL)?;
-                let sstatus = self.read_csr(csr::SSTATUS)?;
-                let sepc = self.read_csr(csr::SEPC)?;
-                let scause = self.read_csr(csr::SCAUSE)?;
-                let stval = self.read_csr(csr::STVAL)?;
-                let stvec = self.read_csr(csr::STVEC)?;
-                let medeleg = self.read_csr(csr::MEDELEG)?;
+                let v = &values[33..];
+                let prv = (v[0] & 3) as u8;
+                let (mstatus, mepc, mcause, mtval) = (v[1], v[2], v[3], v[4]);
+                let (sstatus, sepc, scause, stval) = (v[5], v[6], v[7], v[8]);
+                let (stvec, medeleg) = (v[9], v[10]);
                 let satp = if prv == 1 && mstatus & (1 << 20) != 0 {
                     // QEMU applies mstatus.TVM to debugger satp reads. Elevate
                     // only for this otherwise-unreadable sample; changing mode
@@ -396,12 +525,23 @@ impl Drop for QemuGdbTarget {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        // SIGKILL leaves QEMU no chance to remove its socket.
+        let _ = std::fs::remove_file(&self.socket_path);
     }
 }
 
-fn pick_free_port() -> Result<u16, TargetError> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    Ok(listener.local_addr()?.port())
+/// Frames one RSP packet: `$payload#checksum`.
+fn rsp_frame(payload: &str) -> String {
+    let sum: u8 = payload.bytes().fold(0u8, u8::wrapping_add);
+    format!("${payload}#{sum:02x}")
+}
+
+/// Returns a short, process- and spawn-unique socket path. macOS limits
+/// `sun_path` to 104 bytes, so the file name is kept short.
+fn unique_socket_path() -> PathBuf {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("rlq-{}-{sequence}.sock", std::process::id()))
 }
 
 fn encode_le_hex_u64(val: u64) -> String {
@@ -468,16 +608,12 @@ mod tests {
 
     #[test]
     fn zicfilp_and_pointer_masking_match_qemu_in_lockstep() {
-        let local_qemu =
-            "/Users/kmehltretter/codex/linux-work/qemu/build-d7314928-riscv64/qemu-system-riscv64";
-        let qemu_bin = if std::path::Path::new(local_qemu).exists() {
-            local_qemu
-        } else {
-            "qemu-system-riscv64"
-        };
-        let Ok(mut qemu) = QemuGdbTarget::spawn_bare_with_pmp(Path::new(qemu_bin), false) else {
+        let Some(qemu_bin) =
+            crate::tools::qemu_for_test("zicfilp_and_pointer_masking_match_qemu_in_lockstep")
+        else {
             return;
         };
+        let mut qemu = QemuGdbTarget::spawn_bare_with_pmp(&qemu_bin, false).expect("spawn QEMU");
         let mut rivemu = crate::target::RivemuTarget::new_bare(true).unwrap();
 
         let code_base = 0x8000_0000u64;
@@ -519,9 +655,11 @@ mod tests {
             trap_bytes.extend_from_slice(&word.to_le_bytes());
         }
 
-        let mut init = ArchState::default();
-        init.pc = code_base;
-        init.prv = 3;
+        let mut init = ArchState {
+            pc: code_base,
+            prv: 3,
+            ..ArchState::default()
+        };
         init.x[8] = 0x8001_0000;
         init.mepc = code_base + 0x14;
         // MPP = S (1 << 11), MPELP = 1 (1 << 41)
@@ -559,16 +697,12 @@ mod tests {
 
     #[test]
     fn zawrs_wrs_nto_and_wrs_sto_match_qemu_in_lockstep() {
-        let local_qemu =
-            "/Users/kmehltretter/codex/linux-work/qemu/build-d7314928-riscv64/qemu-system-riscv64";
-        let qemu_bin = if std::path::Path::new(local_qemu).exists() {
-            local_qemu
-        } else {
-            "qemu-system-riscv64"
-        };
-        let Ok(mut qemu) = QemuGdbTarget::spawn_bare_with_pmp(Path::new(qemu_bin), false) else {
+        let Some(qemu_bin) =
+            crate::tools::qemu_for_test("zawrs_wrs_nto_and_wrs_sto_match_qemu_in_lockstep")
+        else {
             return;
         };
+        let mut qemu = QemuGdbTarget::spawn_bare_with_pmp(&qemu_bin, false).expect("spawn QEMU");
         let mut rivemu = crate::target::RivemuTarget::new_bare(true).unwrap();
 
         let code_base = 0x8000_0000u64;
@@ -595,9 +729,11 @@ mod tests {
         }
 
         // Phase 1: S-mode with TW = 0: both wrs.nto and wrs.sto retire and clear LR reservation.
-        let mut init = ArchState::default();
-        init.pc = code_base;
-        init.prv = 1; // S-mode
+        let mut init = ArchState {
+            pc: code_base,
+            prv: 1, // S-mode
+            ..ArchState::default()
+        };
         init.x[8] = 0x8001_0000;
         init.x[12] = 0x77;
 
@@ -615,10 +751,7 @@ mod tests {
             let r_state = rivemu.get_state().unwrap();
             let q_state = qemu.get_state().unwrap();
             let diffs = r_state.diff(&q_state, true);
-            assert!(
-                diffs.is_empty(),
-                "phase 1 step {step} diverged: {diffs:?}"
-            );
+            assert!(diffs.is_empty(), "phase 1 step {step} diverged: {diffs:?}");
         }
         let post_p1 = rivemu.get_state().unwrap();
         assert_eq!(post_p1.x[11], 1); // sc.d after wrs.nto failed
@@ -638,10 +771,7 @@ mod tests {
             let r_state = rivemu.get_state().unwrap();
             let q_state = qemu.get_state().unwrap();
             let diffs = r_state.diff(&q_state, true);
-            assert!(
-                diffs.is_empty(),
-                "phase 2 step {step} diverged: {diffs:?}"
-            );
+            assert!(diffs.is_empty(), "phase 2 step {step} diverged: {diffs:?}");
         }
         let post_p2 = rivemu.get_state().unwrap();
         assert_eq!(post_p2.pc, trap_base);
@@ -651,16 +781,12 @@ mod tests {
 
     #[test]
     fn smepmp_and_smstateen_match_qemu_in_lockstep() {
-        let local_qemu =
-            "/Users/kmehltretter/codex/linux-work/qemu/build-d7314928-riscv64/qemu-system-riscv64";
-        let qemu_bin = if std::path::Path::new(local_qemu).exists() {
-            local_qemu
-        } else {
-            "qemu-system-riscv64"
-        };
-        let Ok(mut qemu) = QemuGdbTarget::spawn_bare_with_pmp(Path::new(qemu_bin), true) else {
+        let Some(qemu_bin) =
+            crate::tools::qemu_for_test("smepmp_and_smstateen_match_qemu_in_lockstep")
+        else {
             return;
         };
+        let mut qemu = QemuGdbTarget::spawn_bare_with_pmp(&qemu_bin, true).expect("spawn QEMU");
         let mut rivemu = crate::target::RivemuTarget::new_bare(true).unwrap();
 
         let code_base = 0x8000_0000u64;
@@ -720,10 +846,12 @@ mod tests {
         }
         let trap_bytes = crate::risu::encode::build_trap_handler();
 
-        let mut init = ArchState::default();
-        init.pc = code_base;
-        init.prv = 3; // M-mode
-        init.mepc = scode_base;
+        let mut init = ArchState {
+            pc: code_base,
+            prv: 3, // M-mode
+            mepc: scode_base,
+            ..ArchState::default()
+        };
         init.mstatus |= 1 << 11; // MPP = S
         init.x[10] = data_base;
         init.x[12] = 0xfeed_face_cafe_beef;

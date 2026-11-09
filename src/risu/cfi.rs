@@ -137,8 +137,12 @@ pub fn configure_case(seed: u64, state: &mut ArchState) -> Vec<u8> {
     state.stvec = SV39_TRAP_BASE;
     state.medeleg = CFI_DELEGATION;
 
-    state.mstatus &=
-        !(MSTATUS_MPP_MASK | MSTATUS_MPRV | MSTATUS_SUM | MSTATUS_MXR | MSTATUS_SPELP | MSTATUS_MPELP);
+    state.mstatus &= !(MSTATUS_MPP_MASK
+        | MSTATUS_MPRV
+        | MSTATUS_SUM
+        | MSTATUS_MXR
+        | MSTATUS_SPELP
+        | MSTATUS_MPELP);
     state.sstatus &= !(MSTATUS_SUM | MSTATUS_MXR | MSTATUS_SPELP);
     if !user_mode {
         state.mstatus |= MSTATUS_MPP_SUPERVISOR;
@@ -162,10 +166,9 @@ pub fn configure_case(seed: u64, state: &mut ArchState) -> Vec<u8> {
             state.mstatus |= MSTATUS_MPELP;
             (ENVCFG_ADUE | ENVCFG_LPE, ENVCFG_LPE)
         }
-        Case::PointerMaskingPmlen7And16 => (
-            ENVCFG_ADUE | ENVCFG_SSE | pmm_bits,
-            ENVCFG_SSE | pmm_bits,
-        ),
+        Case::PointerMaskingPmlen7And16 => {
+            (ENVCFG_ADUE | ENVCFG_SSE | pmm_bits, ENVCFG_SSE | pmm_bits)
+        }
         Case::SvukteUserKernelTableFault => (ENVCFG_ADUE, ENVCFG_UKTE),
     };
 
@@ -184,7 +187,11 @@ pub fn configure_case(seed: u64, state: &mut ArchState) -> Vec<u8> {
             state.x[22] = 0xffff_5a5a;
         }
         Case::PointerMaskingPmlen7And16 => {
-            let tag_shift = if pmm_bits == ENVCFG_PMM_PMLEN_16 { 48 } else { 57 };
+            let tag_shift = if pmm_bits == ENVCFG_PMM_PMLEN_16 {
+                48
+            } else {
+                57
+            };
             let tag = 0x2au64 << tag_shift;
             state.x[10] = tag | SCRATCH_BASE;
             state.x[11] = tag | (SS_PAGE_VA + 256);
@@ -206,12 +213,12 @@ pub fn generate_block(rng: &mut Rng, seed: u64, num_insns: usize) -> Vec<u32> {
     // 5-instruction M-mode prologue:
     out.push(i_type(0x73, 0, 0b001, 20, CSR_MENVCFG)); // csrw menvcfg, x20
     if case == Case::ZicfissDisabledMopNop {
-        out.push(i_type(0x73, 0, 0b001, 21, CSR_TDATA1));    // csrw tdata1, x21 (mcontrol6 type = 6)
-        out.push(i_type(0x73, 0, 0b001, 22, CSR_MCONTEXT));  // csrw mcontext, x22 (0xffff_5a5a -> 0x1a5a)
-        out.push(i_type(0x73, 19, 0b010, 0, CSR_MCONTEXT));  // csrr x19, mcontext (observe 13-bit WARL 0x1a5a)
+        out.push(i_type(0x73, 0, 0b001, 21, CSR_TDATA1)); // csrw tdata1, x21 (mcontrol6 type = 6)
+        out.push(i_type(0x73, 0, 0b001, 22, CSR_MCONTEXT)); // csrw mcontext, x22 (0xffff_5a5a -> 0x1a5a)
+        out.push(i_type(0x73, 19, 0b010, 0, CSR_MCONTEXT)); // csrr x19, mcontext (observe 13-bit WARL 0x1a5a)
     } else {
         out.push(i_type(0x73, 0, 0b001, 21, CSR_SENVCFG)); // csrw senvcfg, x21
-        out.push(i_type(0x73, 0, 0b001, 22, CSR_SSP));     // csrw ssp, x22
+        out.push(i_type(0x73, 0, 0b001, 22, CSR_SSP)); // csrw ssp, x22
         out.push(SFENCE_VMA_ALL);
     }
     out.push(MRET);
@@ -229,67 +236,67 @@ pub fn generate_block(rng: &mut Rng, seed: u64, num_insns: usize) -> Vec<u32> {
         match case {
             Case::ZicfissPushPopSsrdp => {
                 out.extend_from_slice(&[
-                    i_type(0x13, 1, 0b000, 8, 0x111),  // addi x1, x8, 0x111
-                    i_type(0x13, 5, 0b000, 8, 0x222),  // addi x5, x8, 0x222
-                    SSPUSH_X1,                         // sspush x1
-                    SSPUSH_X5,                         // sspush x5
-                    ssrdp(12),                         // ssrdp x12
-                    i_type(0x03, 13, 0b011, 12, 0),    // ld x13, 0(x12): read top of shadow stack
-                    i_type(0x03, 14, 0b011, 12, 8),    // ld x14, 8(x12): read previous slot
-                    SSPOPCHK_X5,                       // sspopchk x5
-                    SSPOPCHK_X1,                       // sspopchk x1
-                    ssrdp(15),                         // ssrdp x15 (back to INITIAL_SSP)
+                    i_type(0x13, 1, 0b000, 8, 0x111), // addi x1, x8, 0x111
+                    i_type(0x13, 5, 0b000, 8, 0x222), // addi x5, x8, 0x222
+                    SSPUSH_X1,                        // sspush x1
+                    SSPUSH_X5,                        // sspush x5
+                    ssrdp(12),                        // ssrdp x12
+                    i_type(0x03, 13, 0b011, 12, 0),   // ld x13, 0(x12): read top of shadow stack
+                    i_type(0x03, 14, 0b011, 12, 8),   // ld x14, 8(x12): read previous slot
+                    SSPOPCHK_X5,                      // sspopchk x5
+                    SSPOPCHK_X1,                      // sspopchk x1
+                    ssrdp(15),                        // ssrdp x15 (back to INITIAL_SSP)
                 ]);
             }
             Case::ZicfissPopchkMismatchFault => {
                 out.extend_from_slice(&[
-                    i_type(0x13, 1, 0b000, 8, 0x333),  // addi x1, x8, 0x333
-                    SSPUSH_X1,                         // sspush x1
-                    i_type(0x13, 1, 0b000, 1, 1),      // addi x1, x1, 1 (corrupt link value)
-                    SSPOPCHK_X1,                       // sspopchk x1 -> SW_CHECK (scause=18, stval=3)
-                    i_type(0x13, 1, 0b000, 1, -1),     // addi x1, x1, -1 (restore matching value)
-                    SSPOPCHK_X1,                       // sspopchk x1 -> succeeds
-                    ssrdp(12),                         // ssrdp x12
+                    i_type(0x13, 1, 0b000, 8, 0x333), // addi x1, x8, 0x333
+                    SSPUSH_X1,                        // sspush x1
+                    i_type(0x13, 1, 0b000, 1, 1),     // addi x1, x1, 1 (corrupt link value)
+                    SSPOPCHK_X1, // sspopchk x1 -> SW_CHECK (scause=18, stval=3)
+                    i_type(0x13, 1, 0b000, 1, -1), // addi x1, x1, -1 (restore matching value)
+                    SSPOPCHK_X1, // sspopchk x1 -> succeeds
+                    ssrdp(12),   // ssrdp x12
                 ]);
             }
             Case::ZicfissPagePermAndAmoswap => {
                 out.extend_from_slice(&[
                     i_type(0x13, 12, 0b000, 0, 0x5a),  // li x12, 0x5a
-                    s_type(0x23, 0b011, 9, 12, 0),     // sd x12, 0(x9) on SS page -> STORE_ACCESS (7)
-                    ssamoswap_d(13, 12, 9),            // ssamoswap.d x13, x12, (x9) on SS page -> ok
-                    i_type(0x03, 14, 0b011, 9, 0),     // ld x14, 0(x9) on SS page -> ok (0x5a)
+                    s_type(0x23, 0b011, 9, 12, 0), // sd x12, 0(x9) on SS page -> STORE_ACCESS (7)
+                    ssamoswap_d(13, 12, 9),        // ssamoswap.d x13, x12, (x9) on SS page -> ok
+                    i_type(0x03, 14, 0b011, 9, 0), // ld x14, 0(x9) on SS page -> ok (0x5a)
                     i_type(0x13, 15, 0b000, 0, -0x25), // li x15, -0x25
-                    ssamoswap_w(16, 15, 9),            // ssamoswap.w x16, x15, (x9) -> sign-ext old
-                    ssamoswap_d(17, 12, 10),           // ssamoswap.d on RO page (x10) -> STORE_PAGE_FAULT (15)
+                    ssamoswap_w(16, 15, 9),        // ssamoswap.w x16, x15, (x9) -> sign-ext old
+                    ssamoswap_d(17, 12, 10), // ssamoswap.d on RO page (x10) -> STORE_PAGE_FAULT (15)
                 ]);
             }
             Case::ZicfissDisabledMopNop => {
                 out.extend_from_slice(&[
-                    SSPUSH_X1,                              // sspush x1 (NOP when SSE=0)
-                    SSPOPCHK_X5,                            // sspopchk x5 (NOP when SSE=0)
-                    ssrdp(12),                              // ssrdp x12 -> writes 0 when SSE=0
-                    ssamoswap_d(13, 1, 9),                  // ssamoswap.d -> S-mode ILLEGAL_INSN (2) (sets SDT=1, SRET clears SDT=0)
-                    u_type(0x37, 15, 0x01000),              // lui x15, 0x1000 (0x0100_0000 = status::SDT)
-                    i_type(0x13, 15, 0b110, 15, 2),         // ori x15, x15, 2 (SDT | SIE)
+                    SSPUSH_X1,                                          // sspush x1 (NOP when SSE=0)
+                    SSPOPCHK_X5,                    // sspopchk x5 (NOP when SSE=0)
+                    ssrdp(12),                      // ssrdp x12 -> writes 0 when SSE=0
+                    ssamoswap_d(13, 1, 9), // ssamoswap.d -> S-mode ILLEGAL_INSN (2) (sets SDT=1, SRET clears SDT=0)
+                    u_type(0x37, 15, 0x01000), // lui x15, 0x1000 (0x0100_0000 = status::SDT)
+                    i_type(0x13, 15, 0b110, 15, 2), // ori x15, x15, 2 (SDT | SIE)
                     r_type(0x73, 16, 0b010, 15, 0, CSR_SSTATUS as u32), // csrrs x16, sstatus, x15 (sets SDT=1, auto-clears SIE=0)
                     i_type(0x73, 17, 0b010, 0, CSR_SSTATUS), // csrr x17, sstatus (observe SDT=1, SIE=0)
-                    i_type(0x73, 14, 0b010, 0, CSR_SSP),    // csrr x14, ssp -> Ssdbltrp escalates to M-mode DOUBLE_TRAP (mcause=16)!
+                    i_type(0x73, 14, 0b010, 0, CSR_SSP), // csrr x14, ssp -> Ssdbltrp escalates to M-mode DOUBLE_TRAP (mcause=16)!
                     r_type(0x73, 18, 0b011, 15, 0, CSR_SSTATUS as u32), // csrrc x18, sstatus, x15 (observe SDT=1 after MRET to S-mode, clear SDT=0)
                 ]);
             }
             Case::ZicfilpValidLandingPads => {
                 // 1) Indirect jump via x16 (rs1 != x1, x5, x7) to matching lpad 0x55555:
                 out.extend_from_slice(&[
-                    u_type(0x37, 7, 0x55555),          // lui x7, 0x55555
-                    u_type(0x17, 16, 0),               // auipc x16, 0
-                    i_type(0x13, 16, 0b000, 16, 12),   // addi x16, x16, 12
-                    i_type(0x67, 0, 0b000, 16, 0),     // jalr x0, 0(x16) -> sets ELP = 1
-                    lpad(0x55555),                     // lpad 0x55555 -> matches x7, clears ELP
+                    u_type(0x37, 7, 0x55555),        // lui x7, 0x55555
+                    u_type(0x17, 16, 0),             // auipc x16, 0
+                    i_type(0x13, 16, 0b000, 16, 12), // addi x16, x16, 12
+                    i_type(0x67, 0, 0b000, 16, 0),   // jalr x0, 0(x16) -> sets ELP = 1
+                    lpad(0x55555),                   // lpad 0x55555 -> matches x7, clears ELP
                     // 2) Software-guarded return via x1 (rs1 = x1) does not set ELP:
-                    u_type(0x17, 1, 0),                // auipc x1, 0
-                    i_type(0x13, 1, 0b000, 1, 12),     // addi x1, x1, 12
-                    i_type(0x67, 0, 0b000, 1, 0),      // jalr x0, 0(x1) -> ELP remains 0
-                    i_type(0x13, 12, 0b000, 12, 7),    // addi x12, x12, 7 (non-lpad target succeeds)
+                    u_type(0x17, 1, 0),             // auipc x1, 0
+                    i_type(0x13, 1, 0b000, 1, 12),  // addi x1, x1, 12
+                    i_type(0x67, 0, 0b000, 1, 0),   // jalr x0, 0(x1) -> ELP remains 0
+                    i_type(0x13, 12, 0b000, 12, 7), // addi x12, x12, 7 (non-lpad target succeeds)
                 ]);
             }
             Case::ZicfilpFaultAndSpelpRecovery => {
@@ -297,18 +304,18 @@ pub fn generate_block(rng: &mut Rng, seed: u64, num_insns: usize) -> Vec<u32> {
                 // and saves SPELP=1; trap handler advances sepc by +4 and runs sret, restoring ELP=1
                 // onto the universal `lpad 0` at sepc + 4.
                 out.extend_from_slice(&[
-                    u_type(0x37, 7, 0x55555),          // lui x7, 0x55555
-                    u_type(0x17, 16, 0),               // auipc x16, 0
-                    i_type(0x13, 16, 0b000, 16, 12),   // addi x16, x16, 12
-                    i_type(0x67, 0, 0b000, 16, 0),     // jalr x0, 0(x16) -> sets ELP = 1
-                    lpad(0x77777),                     // lpad 0x77777 -> SW_CHECK (18, stval=2)
-                    lpad(0),                           // lpad 0 -> satisfies restored SPELP -> ELP
+                    u_type(0x37, 7, 0x55555),        // lui x7, 0x55555
+                    u_type(0x17, 16, 0),             // auipc x16, 0
+                    i_type(0x13, 16, 0b000, 16, 12), // addi x16, x16, 12
+                    i_type(0x67, 0, 0b000, 16, 0),   // jalr x0, 0(x16) -> sets ELP = 1
+                    lpad(0x77777),                   // lpad 0x77777 -> SW_CHECK (18, stval=2)
+                    lpad(0),                         // lpad 0 -> satisfies restored SPELP -> ELP
                     // Indirect jump via x16 to non-lpad instruction (`nop`) also raises SW_CHECK:
-                    u_type(0x17, 16, 0),               // auipc x16, 0
-                    i_type(0x13, 16, 0b000, 16, 12),   // addi x16, x16, 12
-                    i_type(0x67, 0, 0b000, 16, 0),     // jalr x0, 0(x16) -> sets ELP = 1
-                    NOP,                               // nop (not an lpad) -> SW_CHECK (18, stval=2)
-                    lpad(0),                           // lpad 0 -> satisfies restored SPELP -> ELP
+                    u_type(0x17, 16, 0),             // auipc x16, 0
+                    i_type(0x13, 16, 0b000, 16, 12), // addi x16, x16, 12
+                    i_type(0x67, 0, 0b000, 16, 0),   // jalr x0, 0(x16) -> sets ELP = 1
+                    NOP,                             // nop (not an lpad) -> SW_CHECK (18, stval=2)
+                    lpad(0),                         // lpad 0 -> satisfies restored SPELP -> ELP
                 ]);
             }
             Case::PointerMaskingPmlen7And16 => {
@@ -316,9 +323,9 @@ pub fn generate_block(rng: &mut Rng, seed: u64, num_insns: usize) -> Vec<u32> {
                     i_type(0x13, 12, 0b000, 0, 0x6b),  // li x12, 0x6b
                     s_type(0x23, 0b011, 10, 12, 0),    // sd x12, 0(x10) (masked -> SCRATCH_BASE)
                     i_type(0x03, 13, 0b011, 10, 0),    // ld x13, 0(x10) (masked -> SCRATCH_BASE)
-                    i_type(0x03, 14, 0b011, 8, 0),     // ld x14, 0(x8)  (untagged alias matches x13)
-                    ssamoswap_d(15, 12, 11),           // ssamoswap.d x15, x12, (x11) (masked -> SS_PAGE_VA+256)
-                    i_type(0x03, 16, 0b011, 11, 0),    // ld x16, 0(x11) (masked load from SS page)
+                    i_type(0x03, 14, 0b011, 8, 0), // ld x14, 0(x8)  (untagged alias matches x13)
+                    ssamoswap_d(15, 12, 11), // ssamoswap.d x15, x12, (x11) (masked -> SS_PAGE_VA+256)
+                    i_type(0x03, 16, 0b011, 11, 0), // ld x16, 0(x11) (masked load from SS page)
                     i_type(0x13, 0, 0b110, 10, 0x000), // prefetch.i 0(x10)  (Zicbop)
                     i_type(0x13, 0, 0b110, 10, 0x021), // prefetch.r 32(x10) (Zicbop)
                     i_type(0x13, 0, 0b110, 10, 0x043), // prefetch.w 64(x10) (Zicbop)
@@ -326,11 +333,11 @@ pub fn generate_block(rng: &mut Rng, seed: u64, num_insns: usize) -> Vec<u32> {
             }
             Case::SvukteUserKernelTableFault => {
                 out.extend_from_slice(&[
-                    i_type(0x13, 12, 0b000, 0, 0x4d),  // li x12, 0x4d
-                    s_type(0x23, 0b011, 8, 12, 0),     // sd x12, 0(x8)  (low U-mode VA succeeds)
-                    i_type(0x03, 13, 0b011, 8, 0),     // ld x13, 0(x8)  (low U-mode VA succeeds)
-                    i_type(0x03, 14, 0b011, 10, 0),    // ld x14, 0(x10) (va[63]=1 -> LOAD_PAGE_FAULT 13)
-                    s_type(0x23, 0b011, 10, 12, 0),    // sd x12, 0(x10) (va[63]=1 -> STORE_PAGE_FAULT 15)
+                    i_type(0x13, 12, 0b000, 0, 0x4d), // li x12, 0x4d
+                    s_type(0x23, 0b011, 8, 12, 0),    // sd x12, 0(x8)  (low U-mode VA succeeds)
+                    i_type(0x03, 13, 0b011, 8, 0),    // ld x13, 0(x8)  (low U-mode VA succeeds)
+                    i_type(0x03, 14, 0b011, 10, 0), // ld x14, 0(x10) (va[63]=1 -> LOAD_PAGE_FAULT 13)
+                    s_type(0x23, 0b011, 10, 12, 0), // sd x12, 0(x10) (va[63]=1 -> STORE_PAGE_FAULT 15)
                 ]);
             }
         }
@@ -356,22 +363,72 @@ fn build_setup_image(user_mode: bool) -> Vec<u8> {
     let ss_flags = PTE_V | PTE_W | PTE_A | PTE_D | u_bit;
 
     // Root L2 entry for 0x8000_0000 (`vpn[2] = 2`) and high alias (`vpn[2] = 0x1ff`) -> L1_PAGE_BASE:
-    write_pte(&mut image, ROOT_PAGE_BASE, vpn_index(CODE_BASE, 2), pointer_pte(L1_PAGE_BASE));
-    write_pte(&mut image, ROOT_PAGE_BASE, vpn_index(HIGH_UKTE_VA, 2), pointer_pte(L1_PAGE_BASE));
+    write_pte(
+        &mut image,
+        ROOT_PAGE_BASE,
+        vpn_index(CODE_BASE, 2),
+        pointer_pte(L1_PAGE_BASE),
+    );
+    write_pte(
+        &mut image,
+        ROOT_PAGE_BASE,
+        vpn_index(HIGH_UKTE_VA, 2),
+        pointer_pte(L1_PAGE_BASE),
+    );
 
     // L1 entry (`vpn[1] = 0`) -> L0_PAGE_BASE:
-    write_pte(&mut image, L1_PAGE_BASE, vpn_index(CODE_BASE, 1), pointer_pte(L0_PAGE_BASE));
+    write_pte(
+        &mut image,
+        L1_PAGE_BASE,
+        vpn_index(CODE_BASE, 1),
+        pointer_pte(L0_PAGE_BASE),
+    );
 
     // L0 leaf entries:
-    write_pte(&mut image, L0_PAGE_BASE, vpn_index(CODE_BASE, 0), leaf_pte(CODE_BASE, code_flags));
-    write_pte(&mut image, L0_PAGE_BASE, vpn_index(CODE_BASE + 0x1000, 0), leaf_pte(CODE_BASE + 0x1000, code_flags));
-    write_pte(&mut image, L0_PAGE_BASE, vpn_index(TRAP_BASE, 0), leaf_pte(TRAP_BASE, trap_flags));
-    write_pte(&mut image, L0_PAGE_BASE, vpn_index(SCRATCH_BASE, 0), leaf_pte(SCRATCH_BASE, data_flags));
-    write_pte(&mut image, L0_PAGE_BASE, vpn_index(SS_PAGE_VA, 0), leaf_pte(SS_PAGE_VA, ss_flags));
-    write_pte(&mut image, L0_PAGE_BASE, vpn_index(RO_PAGE_VA, 0), leaf_pte(SCRATCH_BASE, ro_flags));
+    write_pte(
+        &mut image,
+        L0_PAGE_BASE,
+        vpn_index(CODE_BASE, 0),
+        leaf_pte(CODE_BASE, code_flags),
+    );
+    write_pte(
+        &mut image,
+        L0_PAGE_BASE,
+        vpn_index(CODE_BASE + 0x1000, 0),
+        leaf_pte(CODE_BASE + 0x1000, code_flags),
+    );
+    write_pte(
+        &mut image,
+        L0_PAGE_BASE,
+        vpn_index(TRAP_BASE, 0),
+        leaf_pte(TRAP_BASE, trap_flags),
+    );
+    write_pte(
+        &mut image,
+        L0_PAGE_BASE,
+        vpn_index(SCRATCH_BASE, 0),
+        leaf_pte(SCRATCH_BASE, data_flags),
+    );
+    write_pte(
+        &mut image,
+        L0_PAGE_BASE,
+        vpn_index(SS_PAGE_VA, 0),
+        leaf_pte(SS_PAGE_VA, ss_flags),
+    );
+    write_pte(
+        &mut image,
+        L0_PAGE_BASE,
+        vpn_index(RO_PAGE_VA, 0),
+        leaf_pte(SCRATCH_BASE, ro_flags),
+    );
     for page_index in 1..4 {
         let pa = VM_SETUP_BASE + (page_index * PAGE_SIZE) as u64;
-        write_pte(&mut image, L0_PAGE_BASE, vpn_index(pa, 0), leaf_pte(pa, data_flags));
+        write_pte(
+            &mut image,
+            L0_PAGE_BASE,
+            vpn_index(pa, 0),
+            leaf_pte(pa, data_flags),
+        );
     }
 
     image
